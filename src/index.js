@@ -637,14 +637,20 @@ function attendanceAdminEditModal(status) {
   const date = new TextInputBuilder().setCustomId('date')
     .setLabel('วันที่ (YYYY-MM-DD)')
     .setStyle(TextInputStyle.Short).setRequired(true).setValue(store.today()).setMaxLength(10);
+  const time = new TextInputBuilder().setCustomId('time')
+    .setLabel('เวลา (HH:MM เวลาไทย)')
+    .setPlaceholder('เช่น 18:30 หรือ 20:15')
+    .setStyle(TextInputStyle.Short).setRequired(true).setValue(store.timeBangkok()).setMaxLength(5);
   const reason = new TextInputBuilder().setCustomId('reason')
     .setLabel(status === 'present' ? 'เหตุผลการแก้ไข (ใส่หรือไม่ใส่ก็ได้)' : 'เหตุผลการแก้ไข')
     .setPlaceholder(status === 'present' ? 'เช่น มาจริงแล้ว ยกเลิกลาวันนี้' : 'เช่น เปลี่ยนเป็นลา เพราะมีเหตุจำเป็น')
     .setStyle(TextInputStyle.Paragraph).setRequired(status !== 'present').setMaxLength(250);
   modal.addComponents(new ActionRowBuilder().addComponents(member),
-    new ActionRowBuilder().addComponents(date), new ActionRowBuilder().addComponents(reason));
+    new ActionRowBuilder().addComponents(date), new ActionRowBuilder().addComponents(time),
+    new ActionRowBuilder().addComponents(reason));
   return modal;
 }
+
 function attendanceEditHistoryText(g, limit = 10) {
   const rows = (g.attendanceEditHistory || []).slice(-limit).reverse();
   if (!rows.length) return '📜 **ประวัติแก้ไขเช็กชื่อ**\nยังไม่มีประวัติการแก้ไขโดยผู้ดูแล';
@@ -655,7 +661,7 @@ function attendanceEditHistoryText(g, limit = 10) {
     `ผู้แก้ไข: <@${x.actorId || '0'}>${x.reason ? `\nเหตุผล: ${sanitize(x.reason)}` : ''}`
   ).join('\n\n').slice(0, 1900);
 }
-function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, previous, status, reason, log }) {
+function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, time, previous, status, reason, log }) {
   return {
     username: 'IMT Time Log',
     allowed_mentions: { parse: [] },
@@ -666,6 +672,7 @@ function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, p
         { name: 'ผู้ดูแล', value: `<@${actorId}>`, inline: true },
         { name: 'สมาชิก', value: `<@${targetId}>`, inline: true },
         { name: 'วันที่', value: date, inline: true },
+        { name: 'เวลาเช็กชื่อ', value: time || log?.time || '-', inline: true },
         { name: 'สถานะเดิม', value: previous ? attendanceStatusLabel(previous.status) : 'ไม่มีข้อมูลเดิม', inline: true },
         { name: 'สถานะใหม่', value: attendanceStatusLabel(status), inline: true },
         previous?.reason ? { name: 'เหตุผลเดิม', value: sanitize(previous.reason), inline: false } : null,
@@ -1226,14 +1233,22 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (!['present','late','leave'].includes(status)) throw new Error('สถานะใหม่ไม่ถูกต้อง');
       const targetId = parseDiscordUserId(i.fields.getTextInputValue('member'));
       const date = i.fields.getTextInputValue('date').trim() || store.today();
+      const time = i.fields.getTextInputValue('time').trim() || store.timeBangkok();
+      if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('เวลาไม่ถูกต้อง กรุณาใช้รูปแบบ HH:MM เช่น 18:30');
       const reason = i.fields.getTextInputValue('reason').trim();
-      const result = store.attendanceAdminEdit(i.guildId, date, targetId, status, reason, i.user.id);
+      const result = store.attendanceAdminEdit(i.guildId, date, targetId, status, reason, i.user.id, time);
       if (date === store.today()) {
         try { await refreshDashboard(i.guild, date); } catch (e) { console.error('รีเฟรชรายงานหลังผู้ดูแลแก้เช็กชื่อ:', e.message); }
       }
-      postTimeWebhook(attendanceAdminEditWebhookPayload({ guildId: i.guildId, targetId, actorId: i.user.id, date, previous: result.previous, status, reason, log: result.log }), 'time admin edit')
+      postTimeWebhook(attendanceAdminEditWebhookPayload({ guildId: i.guildId, targetId, actorId: i.user.id, date, time, previous: result.previous, status, reason, log: result.log }), 'time admin edit')
         .catch(e => console.error('ส่ง Time_log การแก้ไขเช็กชื่อไม่สำเร็จ:', e.message));
-      return await i.reply(ep(`🛠 แก้ไขเช็กชื่อแล้ว\nสมาชิก: <@${targetId}>\nวันที่: ${date}\nจาก: ${result.previous ? attendanceStatusLabel(result.previous.status) : 'ไม่มีข้อมูลเดิม'}\nเป็น: ${attendanceStatusLabel(status)}${reason ? `\nเหตุผล: ${sanitize(reason)}` : ''}`));
+      return await i.reply(ep(`🛠 แก้ไขเช็กชื่อแล้ว
+สมาชิก: <@${targetId}>
+วันที่: ${date}
+เวลา: ${time}
+จาก: ${result.previous ? attendanceStatusLabel(result.previous.status) : 'ไม่มีข้อมูลเดิม'}
+เป็น: ${attendanceStatusLabel(status)}${reason ? `
+เหตุผล: ${sanitize(reason)}` : ''}`));
     }
     if (i.isModalSubmit() && i.customId.startsWith('attendance:reason:')) {
       const status = i.customId.substring('attendance:reason:'.length);
@@ -1276,12 +1291,12 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       let components, embed;
       if (kind === 'attendance') {
         components = [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('attendance:present').setLabel('✅ มา').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('attendance:late').setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('attendance:leave').setLabel('📝 ลา').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('attendance:admin:edit').setLabel('🛠 แก้ไขเช็กชื่อ').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('attendance:admin:history').setLabel('📜 ประวัติแก้ไข').setStyle(ButtonStyle.Secondary)
-      )];
+          new ButtonBuilder().setCustomId('attendance:present').setLabel('✅ มา').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('attendance:late').setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('attendance:leave').setLabel('📝 ลา').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('attendance:admin:edit').setLabel('🛠 แก้ไขเช็กชื่อ').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('attendance:admin:history').setLabel('📜 ประวัติแก้ไข').setStyle(ButtonStyle.Secondary)
+        )];
         embed = new EmbedBuilder().setTitle('📋 [IMT] IMMORTAL • เช็กชื่อรายวัน').setDescription('✅ มา: **18:00–23:59 น.**\n🕒 มาสาย / 📝 ลา: **00:00–23:59 น.** (แจ้งก่อน 18:00 ได้)\nลา 1 วันหรือหลายวันได้สูงสุด 31 วัน พร้อมเหตุผล\nเริ่มนับสายจากเวลาที่ผู้ดูแลตั้ง (เริ่มต้น 20:00 น.)\nต้องยืนยันก่อนบันทึก • ใช้ /history ดูประวัติย้อนหลัง');
       } else {
         components = [new ActionRowBuilder().addComponents(
