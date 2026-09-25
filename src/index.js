@@ -759,12 +759,33 @@ async function houseMemberSelectPayload(i, house, page = 0) {
 }
 function housePanelComponents(houseId = null) {
   const suffix = houseId ? `:${houseId}` : '';
-  return [new ActionRowBuilder().addComponents(
+  const rows = [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`house:open${suffix}`).setLabel('🏠 เช็กชื่อลูกบ้าน').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(houseId ? `house:list-open:${houseId}:0` : 'house:list-open:all:0').setLabel('📋 ดูรายชื่อ').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`house:summary${suffix}`).setLabel('📊 สรุปบ้านวันนี้').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`house:history${suffix}`).setLabel('📜 ประวัติเช็กชื่อบ้าน').setStyle(ButtonStyle.Secondary)
   )];
+  if (houseId) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`house:member-add-open:${houseId}`).setLabel('➕ เพิ่มสมาชิก').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`house:member-remove-open:${houseId}`).setLabel('➖ ลบสมาชิก').setStyle(ButtonStyle.Danger)
+    ));
+  }
+  return rows;
+}
+function houseMemberIdModal(action, houseId, houseName = '') {
+  const isAdd = action === 'add';
+  const title = `${isAdd ? 'เพิ่ม' : 'ลบ'}สมาชิกบ้าน${houseName ? ' ' + houseName : ''}`.slice(0, 45);
+  const modal = new ModalBuilder().setCustomId(`house:member-${action}-modal:${houseId}`).setTitle(title);
+  const member = new TextInputBuilder()
+    .setCustomId('member')
+    .setLabel('Discord ID หรือ Mention สมาชิก')
+    .setPlaceholder('เช่น 123456789012345678 หรือ <@123456789012345678>')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(80);
+  modal.addComponents(new ActionRowBuilder().addComponents(member));
+  return modal;
 }
 function houseDirectoryRows(g, houseId = null) {
   const rows = [];
@@ -1314,6 +1335,15 @@ client.on(Events.InteractionCreate, async i => {
         return;
       }
 
+      if (i.customId.startsWith('house:member-add-open:') || i.customId.startsWith('house:member-remove-open:')) {
+        const parts = i.customId.split(':');
+        const action = parts[1] === 'member-add-open' ? 'add' : 'remove';
+        const houseId = parts[2];
+        const house = store.houseList(i.guildId).find(h => h.id === houseId);
+        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์จัดการสมาชิกบ้านนี้');
+        return await i.showModal(houseMemberIdModal(action, house.id, house.name));
+      }
+
       if (i.customId === 'house:open' || i.customId.startsWith('house:open:')) {
         const parts = i.customId.split(':');
         const fixedHouseId = parts[2] || null;
@@ -1610,6 +1640,22 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       const raw = i.fields.getTextInputValue('quantity').trim();
       if (!/^\d{1,13}$/.test(raw)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม 1–1,000,000,000,000');
       return await beginDelivery(i, i.fields.getTextInputValue('name'), Number(raw), i.fields.getTextInputValue('unit') || 'ชิ้น');
+    }
+
+    if (i.isModalSubmit() && (i.customId.startsWith('house:member-add-modal:') || i.customId.startsWith('house:member-remove-modal:'))) {
+      const isAdd = i.customId.startsWith('house:member-add-modal:');
+      const houseId = i.customId.split(':')[2];
+      const house = store.houseList(i.guildId).find(h => h.id === houseId);
+      if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์จัดการสมาชิกบ้านนี้');
+      const targetId = parseDiscordUserId(i.fields.getTextInputValue('member'));
+      const result = isAdd
+        ? store.houseMemberAdd(i.guildId, house.id, targetId)
+        : store.houseMemberRemove(i.guildId, house.id, targetId);
+      const actionText = isAdd ? 'เพิ่ม/ย้ายสมาชิกเข้าบ้านแล้ว' : 'ลบสมาชิกออกจากบ้านแล้ว';
+      return await i.reply(ep(`${isAdd ? '➕' : '➖'} ${actionText}
+บ้าน: **${sanitize(result.name)}**
+สมาชิก: <@${targetId}>
+จำนวนลูกบ้านปัจจุบัน: ${(result.memberIds || []).length} คน`));
     }
 
     if (i.isModalSubmit() && i.customId.startsWith('attendance:adminedit:')) {
