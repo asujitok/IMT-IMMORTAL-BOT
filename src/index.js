@@ -20,6 +20,7 @@ const token = process.env.DISCORD_TOKEN;
 const deliveryLogWebhookUrl = process.env.DELIVERY_LOG_WEBHOOK_URL || '';
 const vaultLogWebhookUrl = process.env.VAULT_LOG_WEBHOOK_URL || process.env.VAULT_LOG || process.env.Vault_log || '';
 const timeLogWebhookUrl = process.env.TIME_LOG_WEBHOOK_URL || process.env.TIME_LOG || process.env.Time_log || '';
+const homeLogWebhookUrl = process.env.HOME_LOG_WEBHOOK_URL || process.env.HOME_LOG || process.env.home_log || process.env.Home_log || process.env.homeLog || '';
 if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
@@ -599,6 +600,15 @@ async function postTimeWebhook(payload, label = 'time') {
   if (!response.ok) throw new Error(`${label} webhook ล้มเหลว: ${response.status}`);
   return true;
 }
+async function postHomeWebhook(payload, label = 'home') {
+  if (!homeLogWebhookUrl) return false;
+  const response = await fetch(homeLogWebhookUrl, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`${label} webhook ล้มเหลว: ${response.status}`);
+  return true;
+}
 function attendanceActionWebhookPayload({ guildId, userId, status, reason = '', dates = [], actorId = null, isEdit = false }) {
   const rangeText = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]} (${dates.length} วัน)` : (dates[0] || store.today());
   return {
@@ -681,6 +691,110 @@ function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, t
         { name: 'Guild', value: guildId, inline: true }
       ].filter(Boolean),
       footer: { text: timeFooterText('Admin Edit') },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+
+
+function houseStatusLabel(status) {
+  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || sanitize(status || '-');
+}
+function canManageHouse(i, house) {
+  return manager(i) || house?.leaderId === i.user.id;
+}
+function housesForUser(guildId, userId, isManager = false) {
+  const houses = store.houseList(guildId);
+  return isManager ? houses : houses.filter(h => h.leaderId === userId);
+}
+async function houseMemberLabel(guild, userId) {
+  const m = await guild.members.fetch(userId).catch(() => null);
+  return (m?.displayName || m?.user?.username || userId).slice(0, 90);
+}
+async function houseMemberSelectPayload(i, house) {
+  if (!house?.memberIds?.length) return { ...ep(`บ้าน **${sanitize(house?.name)}** ยังไม่มีลูกบ้าน`), components: [] };
+  const options = [];
+  for (const userId of house.memberIds.slice(0, 25)) {
+    options.push({ label: await houseMemberLabel(i.guild, userId), value: userId, description: `Discord ID: ${userId}`.slice(0, 100) });
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`house:member:${house.id}`)
+    .setPlaceholder(`เลือกสมาชิกใน ${house.name}`)
+    .addOptions(options);
+  return { ...ep(`🏠 **${sanitize(house.name)}**\nเลือกสมาชิกที่ต้องการเช็กชื่อแทน`), components: [new ActionRowBuilder().addComponents(menu)] };
+}
+function housePanelComponents() {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('house:open').setLabel('🏠 เช็กชื่อลูกบ้าน').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('house:summary').setLabel('📊 สรุปบ้านวันนี้').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('house:history').setLabel('📜 ประวัติเช็กชื่อบ้าน').setStyle(ButtonStyle.Secondary)
+  )];
+}
+function houseListText(g) {
+  const houses = g?.houses || [];
+  if (!houses.length) return 'ยังไม่มีบ้าน ใช้ `/house add` เพื่อสร้างบ้านก่อน';
+  return houses.map((h, idx) => `${idx + 1}. 🏠 **${sanitize(h.name)}**\nหัวหน้า: ${h.leaderId ? `<@${h.leaderId}>` : 'ยังไม่ตั้ง'}\nลูกบ้าน: ${(h.memberIds || []).length ? h.memberIds.map(id => `<@${id}>`).join(', ') : 'ยังไม่มี'}`).join('\n\n').slice(0, 1900);
+}
+function houseSummaryText(g, date = store.today(), houseFilter = null) {
+  const houses = (g?.houses || []).filter(h => !houseFilter || h.id === houseFilter);
+  if (!houses.length) return 'ยังไม่มีบ้านสำหรับสรุป';
+  const day = g?.houseAttendance?.[date] || {};
+  const lines = [`📊 **สรุปเช็กชื่อบ้านประจำวันที่ ${date}**`, 'เช็กชื่อบ้านนี้แยกจากเช็กชื่อปกติ ไม่ไปแก้สถานะเช็กชื่อหลัก'];
+  for (const h of houses) {
+    const rows = day[h.id] || {};
+    const members = h.memberIds || [];
+    const present = [], late = [], leave = [], missing = [];
+    for (const id of members) {
+      const st = rows[id]?.status;
+      if (st === 'present') present.push(id); else if (st === 'late') late.push(id); else if (st === 'leave') leave.push(id); else missing.push(id);
+    }
+    const mention = arr => arr.length ? arr.slice(0, 15).map(id => `<@${id}>`).join(', ') + (arr.length > 15 ? ` และอีก ${arr.length - 15} คน` : '') : '-';
+    lines.push(`\n🏠 **${sanitize(h.name)}**${h.leaderId ? ` — หัวหน้า <@${h.leaderId}>` : ''}`);
+    lines.push(`✅ มา (${present.length}): ${mention(present)}`);
+    lines.push(`🕒 มาสาย (${late.length}): ${mention(late)}`);
+    lines.push(`📝 ลา (${leave.length}): ${mention(leave)}`);
+    lines.push(`❌ ยังไม่เช็ก (${missing.length}): ${mention(missing)}`);
+  }
+  return lines.join('\n').slice(0, 3900);
+}
+function houseHistoryText(g, houseId = null, limit = 10) {
+  const rows = store.houseAttendanceHistoryFromData ? [] : (g?.houseAttendanceHistory || []);
+  const filtered = rows.filter(x => !houseId || x.houseId === houseId).slice(-limit).reverse();
+  if (!filtered.length) return '📜 ยังไม่มีประวัติเช็กชื่อบ้าน';
+  return '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + filtered.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
+}
+function houseTimeWebhookPayload({ guildId, house, targetId, actorId, status, previous, log }) {
+  return {
+    username: 'IMT Home Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: '🏠 HOME LOG — หัวหน้าบ้านเช็กชื่อ',
+      color: attendanceWebhookColor(status),
+      fields: [
+        { name: 'บ้าน', value: sanitize(house.name), inline: true },
+        { name: 'หัวหน้าบ้าน/ผู้เช็ก', value: `<@${actorId}>`, inline: true },
+        { name: 'สมาชิก', value: `<@${targetId}>`, inline: true },
+        { name: 'สถานะเดิม', value: previous ? houseStatusLabel(previous.status) : 'ไม่มีข้อมูลเดิม', inline: true },
+        { name: 'สถานะใหม่', value: houseStatusLabel(status), inline: true },
+        { name: 'หมายเหตุ', value: 'เช็กชื่อบ้านแยกจากเช็กชื่อปกติ', inline: false },
+        { name: 'รหัส', value: log?.id || '-', inline: true },
+        { name: 'Guild', value: guildId, inline: true }
+      ],
+      footer: { text: '[IMT] IMMORTAL • Home Log • เวลาไทย' },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+function houseDailySummaryPayload(guildId, g, date) {
+  return {
+    username: 'IMT Home Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: `🏠 HOME LOG — สรุปเช็กชื่อบ้านประจำวัน • ${date}`,
+      description: houseSummaryText(g, date),
+      color: 0x57F287,
+      fields: [{ name: 'หมายเหตุ', value: 'รายงานนี้แยกจากเช็กชื่อปกติ ไม่รวม/ไม่แก้ข้อมูลเช็กชื่อหลัก', inline: false }, { name: 'Guild', value: guildId, inline: true }],
+      footer: { text: '[IMT] IMMORTAL • Home Summary • เวลาไทย' },
       timestamp: new Date().toISOString()
     }]
   };
@@ -769,6 +883,12 @@ async function dailyWebhookSummaries() {
         await postTimeWebhook(attendanceDailySummaryPayload(g, date, roster), 'time summary');
         store.markSent(id, date, 'timeWebhookSummary');
       } catch (e) { console.error('ส่งสรุป webhook เช็กชื่อ 23:59 ไม่สำเร็จ:', e.message); }
+    }
+    if (homeLogWebhookUrl && !g.sent?.[date]?.homeWebhookSummary && (g.houses || []).length) {
+      try {
+        await postHomeWebhook(houseDailySummaryPayload(id, g, date), 'home summary');
+        store.markSent(id, date, 'homeWebhookSummary');
+      } catch (e) { console.error('ส่งสรุป webhook เช็กชื่อบ้านเข้า home_log 23:59 ไม่สำเร็จ:', e.message); }
     }
     if (deliveryLogWebhookUrl && !g.sent?.[date]?.deliveryWebhookSummary) {
       const text = delivery.summary(g, date, roster, g.config?.time || '20:00', '23:59') +
@@ -1003,6 +1123,27 @@ client.on(Events.InteractionCreate, async i => {
         .slice(0, 25).map(it => ({ name: it.name, value: it.id }));
       return await i.respond(choices);
     }
+    if (i.isStringSelectMenu()) {
+      if (i.customId === 'house:select-house') {
+        const houseId = i.values[0];
+        const house = store.houseList(i.guildId).find(h => h.id === houseId);
+        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์เช็กชื่อบ้านนี้');
+        return await i.reply(await houseMemberSelectPayload(i, house));
+      }
+      if (i.customId.startsWith('house:member:')) {
+        const houseId = i.customId.substring('house:member:'.length);
+        const targetId = i.values[0];
+        const house = store.houseList(i.guildId).find(h => h.id === houseId);
+        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์เช็กชื่อบ้านนี้');
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:present`).setLabel('✅ มา').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:late`).setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:leave`).setLabel('📝 ลา').setStyle(ButtonStyle.Secondary)
+        );
+        return await i.reply({ ...ep(`เลือกสถานะให้ <@${targetId}>\nบ้าน: **${sanitize(house.name)}**`), components: [row] });
+      }
+    }
+
     if (i.isButton()) {
       if (i.customId === 'history:prev' || i.customId === 'history:next') {
         const view = store.getGuild(i.guildId)?.historyViews?.[i.message.id];
@@ -1014,6 +1155,40 @@ client.on(Events.InteractionCreate, async i => {
         await i.update({ embeds: [new EmbedBuilder(pages[page])], components: historyButtons(page, pages.length), allowedMentions: silent });
         store.update(i.guildId, db => { if (db.historyViews?.[i.message.id]) db.historyViews[i.message.id].page = page; });
         return;
+      }
+
+      if (i.customId === 'house:open') {
+        const houses = housesForUser(i.guildId, i.user.id, manager(i));
+        if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
+        if (houses.length === 1) return await i.reply(await houseMemberSelectPayload(i, houses[0]));
+        const menu = new StringSelectMenuBuilder().setCustomId('house:select-house').setPlaceholder('เลือกบ้านที่ต้องการเช็กชื่อ')
+          .addOptions(houses.slice(0, 25).map(h => ({ label: h.name.slice(0, 100), value: h.id, description: `${(h.memberIds || []).length} ลูกบ้าน`.slice(0, 100) })));
+        return await i.reply({ ...ep('เลือกบ้านที่ต้องการเช็กชื่อ'), components: [new ActionRowBuilder().addComponents(menu)] });
+      }
+      if (i.customId === 'house:summary') {
+        const g = store.getGuild(i.guildId);
+        const houses = housesForUser(i.guildId, i.user.id, manager(i));
+        if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
+        const text = manager(i) ? houseSummaryText(g, store.today()) : houses.map(h => houseSummaryText(g, store.today(), h.id)).join('\n\n');
+        return await i.reply(ep(text));
+      }
+      if (i.customId === 'house:history') {
+        const g = store.getGuild(i.guildId);
+        const houses = housesForUser(i.guildId, i.user.id, manager(i));
+        if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
+        const ids = new Set(houses.map(h => h.id));
+        const rows = (g.houseAttendanceHistory || []).filter(x => manager(i) || ids.has(x.houseId)).slice(-10).reverse();
+        if (!rows.length) return await i.reply(ep('📜 ยังไม่มีประวัติเช็กชื่อบ้าน'));
+        const text = '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + rows.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
+        return await i.reply(ep(text));
+      }
+      if (i.customId.startsWith('house:mark:')) {
+        const [, , houseId, targetId, status] = i.customId.split(':');
+        const house = store.houseList(i.guildId).find(h => h.id === houseId);
+        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์เช็กชื่อบ้านนี้');
+        const result = store.houseMark(i.guildId, store.today(), houseId, targetId, status, i.user.id, 'เช็กโดยหัวหน้าบ้าน');
+        postHomeWebhook(houseTimeWebhookPayload({ guildId: i.guildId, house: result.house, targetId, actorId: i.user.id, status, previous: result.previous, log: result.log }), 'house attendance').catch(e => console.error('ส่ง home_log เช็กชื่อบ้านไม่สำเร็จ:', e.message));
+        return await i.reply(ep(`🏠 เช็กชื่อบ้านแล้ว\nบ้าน: **${sanitize(result.house.name)}**\nสมาชิก: <@${targetId}>\nสถานะ: ${houseStatusLabel(status)}\nหมายเหตุ: ระบบนี้แยกจากเช็กชื่อปกติ`));
       }
 
       if (i.customId === 'attendance:admin:edit') {
@@ -1486,6 +1661,46 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
     if (i.commandName === 'checkitem') return await checkItem(i,
       i.options.getString('name', true), i.options.getInteger('found', true),
       i.options.getString('condition', true), i.options.getString('note') || '');
+    if (i.commandName === 'house') {
+      const group = i.options.getSubcommandGroup(false);
+      const sub = i.options.getSubcommand();
+      if (!manager(i) && !(sub === 'list')) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+      if (sub === 'panel') {
+        const g = configOf(i);
+        const target = i.options.getChannel('channel') || await i.guild.channels.fetch(g.config.attendanceChannelId);
+        if (!target?.isTextBased()) throw new Error('ห้องนี้ส่งข้อความไม่ได้');
+        const embed = new EmbedBuilder().setTitle('🏠 [IMT] IMMORTAL • เช็กชื่อตามบ้าน')
+          .setDescription('ระบบนี้ **แยกจากเช็กชื่อปกติ**\nให้หัวหน้าบ้านเช็กชื่อแทนลูกบ้านของตัวเองเท่านั้น\nคนที่อยู่ในบ้านแต่ยังไม่ถูกเช็ก จะขึ้นเป็น ❌ ยังไม่เช็ก ในสรุปบ้าน 23:59');
+        if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
+        await target.send({ embeds: [embed], components: housePanelComponents(), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+        return await i.reply(ep(`ส่งแผงเช็กชื่อตามบ้านไปที่ ${target} แล้ว`));
+      }
+      if (sub === 'add') {
+        const house = store.houseAdd(i.guildId, i.options.getString('name', true));
+        return await i.reply(ep(`เพิ่มบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
+      }
+      if (sub === 'remove') {
+        const house = store.houseRemove(i.guildId, i.options.getString('name', true));
+        return await i.reply(ep(`ลบบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
+      }
+      if (sub === 'list') {
+        const g = store.getGuild(i.guildId);
+        return await i.reply(ep('🏠 **รายชื่อบ้าน**\n' + houseListText(g)));
+      }
+      if (group === 'leader' && sub === 'set') {
+        const house = store.houseLeaderSet(i.guildId, i.options.getString('house', true), i.options.getUser('user', true).id);
+        return await i.reply(ep(`ตั้งหัวหน้าบ้านแล้ว\nบ้าน: **${sanitize(house.name)}**\nหัวหน้า: <@${house.leaderId}>`));
+      }
+      if (group === 'member' && sub === 'add') {
+        const house = store.houseMemberAdd(i.guildId, i.options.getString('house', true), i.options.getUser('user', true).id);
+        return await i.reply(ep(`เพิ่ม/ย้ายลูกบ้านแล้ว\nบ้าน: **${sanitize(house.name)}**\nสมาชิก: ${house.memberIds.map(id => `<@${id}>`).join(', ') || '-'}`));
+      }
+      if (group === 'member' && sub === 'remove') {
+        const house = store.houseMemberRemove(i.guildId, i.options.getString('house', true), i.options.getUser('user', true).id);
+        return await i.reply(ep(`เอาลูกบ้านออกแล้ว\nบ้าน: **${sanitize(house.name)}**`));
+      }
+    }
+
     if (i.commandName === 'status') {
       const g = configOf(i);
       if (!onlyTeam(i, g)) throw new Error('คุณยังไม่มีบทบาทสมาชิกทีมที่กำหนด');
