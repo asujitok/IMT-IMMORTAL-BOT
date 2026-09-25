@@ -512,10 +512,9 @@ function deliveryRequiredComponents(g) {
         .setStyle(ButtonStyle.Danger)
     ));
   }
+  // แถวด้านล่างของรายงานสด: เอาปุ่มที่ซ้ำกับ Panel หลักออก
+  // เหลือเฉพาะปุ่ม Reset ที่เกี่ยวกับรายงานนี้โดยตรง
   components.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('delivery:checklist').setLabel('📋 เช็คชื่อส่งของ').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('delivery:reset-rows').setLabel('🔄 Reset รายชื่อ').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delivery:reset-items').setLabel('🧹 Reset ของ').setStyle(ButtonStyle.Danger)
   ));
