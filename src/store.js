@@ -200,15 +200,16 @@ function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
     g.locker ||= [];
     const entry = g.locker.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
     if (entry) {
+      const beforeQty = entry.quantity;
       const next = entry.quantity + quantity;
       if (!Number.isSafeInteger(next)) throw new Error('ยอดรวมเกินจำนวนที่ระบบรองรับ');
       entry.quantity = next;
       if (unit) entry.unit = unit;
-      return { entry, created: false };
+      return { entry, created: false, beforeQty, afterQty: entry.quantity };
     }
     const created = { id: randomUUID(), name, quantity, unit };
     g.locker.push(created);
-    return { entry: created, created: true };
+    return { entry: created, created: true, beforeQty: 0, afterQty: quantity };
   });
 }
 
@@ -241,6 +242,40 @@ function lockerRemove(id, name) {
   });
 }
 
+
+function deliveryLogAdd(id, type, data = {}) {
+  if (!type || typeof type !== 'string') throw new Error('ประเภทประวัติส่งของไม่ถูกต้อง');
+  return update(id, g => {
+    g.deliveryHistory ||= [];
+    const seq = (g.deliveryHistory.at(-1)?.seq || 0) + 1;
+    const entry = {
+      id: 'DL-' + String(seq).padStart(6, '0'), seq, type,
+      date: data.date || today(), at: new Date().toISOString(),
+      actorId: data.actorId || null, userId: data.userId || null, reviewerId: data.reviewerId || null,
+      deliveryId: data.deliveryId || null, itemName: data.itemName || null,
+      quantity: Number.isSafeInteger(data.quantity) ? data.quantity : null,
+      unit: data.unit || null, status: data.status || null, lockerAction: data.lockerAction || null,
+      beforeQty: Number.isSafeInteger(data.beforeQty) ? data.beforeQty : null,
+      afterQty: Number.isSafeInteger(data.afterQty) ? data.afterQty : null,
+      note: data.note || null
+    };
+    g.deliveryHistory.push(entry);
+    if (g.deliveryHistory.length > 1000) g.deliveryHistory.splice(0, g.deliveryHistory.length - 1000);
+    return entry;
+  });
+}
+function deliveryHistory(id, { userId = null, itemName = null, date = null, limit = 10 } = {}) {
+  const g = getGuild(id);
+  let rows = [...(g?.deliveryHistory || [])];
+  if (userId) rows = rows.filter(x => x.userId === userId || x.actorId === userId || x.reviewerId === userId);
+  if (itemName) {
+    const target = String(itemName).trim().toLocaleLowerCase();
+    rows = rows.filter(x => String(x.itemName || '').toLocaleLowerCase().includes(target));
+  }
+  if (date) rows = rows.filter(x => x.date === date);
+  return rows.reverse().slice(0, Math.max(1, Math.min(Number(limit) || 10, 25)));
+}
+
 function markSent(id, date, kind) {
   update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
 }
@@ -248,5 +283,5 @@ module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
   attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
   deliveryItemUpsert, deliveryItemRemove, deliveryRoleAdd, deliveryRoleRemove,
-  saveRosterAtClose, saveHistoryView, removeHistoryView
+  deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
 };
