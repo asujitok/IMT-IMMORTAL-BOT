@@ -103,11 +103,33 @@ test('สมาชิกหนึ่งคนถูกย้ายได้บ�
 });
 
 
+
+test('locker add บวกยอดเองและ locker remove ลดจำนวนเอง', () => {
+  const gid = 'g_lock_calc';
+  const first = db.lockerAdd(gid, 'ผลึกทะเล', 10, 'ชิ้น');
+  assert.equal(first.beforeQty, 0);
+  assert.equal(first.afterQty, 10);
+  assert.equal(first.created, true);
+
+  const added = db.lockerAdd(gid, 'ผลึกทะเล', 5, 'ชิ้น');
+  assert.equal(added.beforeQty, 10);
+  assert.equal(added.afterQty, 15);
+  assert.equal(added.created, false);
+
+  const removed = db.lockerRemove(gid, 'ผลึกทะเล', 3);
+  assert.equal(removed.beforeQty, 15);
+  assert.equal(removed.afterQty, 12);
+  assert.equal(removed.deleted, false);
+  assert.equal(db.getGuild(gid).locker.find(x => x.name === 'ผลึกทะเล').quantity, 12);
+
+  assert.throws(() => db.lockerRemove(gid, 'ผลึกทะเล', 99), /ของในตู้มีแค่/);
+});
+
 test('lockerSummary returns rows and item count', () => {
-  store.lockerAdd('g_lock_summary', 'red money', 3299, 'บาท');
-  store.lockerAdd('g_lock_summary', 'weapon box', 8, 'ชิ้น');
-  const g = store.getGuild('g_lock_summary');
-  const summary = store.lockerSummary(g);
-  expect(summary.totalItems).toBe(2);
-  expect(summary.rows.some(x => x.name === 'red money')).toBe(true);
+  db.lockerAdd('g_lock_summary', 'red money', 3299, 'บาท');
+  db.lockerAdd('g_lock_summary', 'weapon box', 8, 'ชิ้น');
+  const g = db.getGuild('g_lock_summary');
+  const summary = db.lockerSummary(g);
+  assert.equal(summary.totalItems, 2);
+  assert.equal(summary.rows.some(x => x.name === 'red money'), true);
 });
