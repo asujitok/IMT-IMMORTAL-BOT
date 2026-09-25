@@ -25,13 +25,17 @@ if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
 }
-// สมัครใช้ GuildMembers เฉพาะเมื่อเปิดสิทธิ์ SERVER MEMBERS INTENT ที่หน้า Discord แล้ว
-const hasMemberIntent = process.env.ENABLE_MEMBERS_INTENT === 'true';
+// บังคับเปิด GuildMembers intent เพื่ออ่านรายชื่อสมาชิกสำหรับปุ่ม 📋 ดูรายชื่อ
+// ต้องเปิด SERVER MEMBERS INTENT ใน Discord Developer Portal ด้วย
+const hasMemberIntent = true;
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-  ]
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildMembers
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 const silent = { parse: [] };
 const attendanceNames = attendanceFlow.STATUSES;
@@ -91,13 +95,12 @@ async function announce(guild, channelId, message) {
 // หนึ่งข้อความรายงานต่อวันในห้อง Discord; อัปเดตข้อความเดิมทุกครั้งที่เช็กชื่อ
 const dashboardQueues = new Map();
 async function optionalRoster(guild, config) {
-  if (!hasMemberIntent) return null;
   try {
-    const members = await guild.members.fetch();
+    const members = await guild.members.fetch({ withPresences: false });
     return [...members.values()].filter(m => !m.user.bot && m.roles.cache.has(config.roleId));
   } catch (error) {
-    console.error('อ่านสมาชิกเพื่อรายงานไม่ได้ จึงแสดงเฉพาะผู้เช็กชื่อ:', error.message);
-    return null;
+    console.error('อ่านสมาชิกเพื่อรายงานไม่ได้:', error?.code || '', error?.message || error);
+    return { __error: true, message: error?.message || String(error), code: error?.code || null };
   }
 }
 function historyButtons(page, total) {
@@ -816,9 +819,9 @@ function houseDirectoryPayload(g, page = 0, houseId = null) {
 
   const target = houseId || 'all';
   const components = [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`house:list:${target}:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
-    new ButtonBuilder().setCustomId(`house:list:${target}:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`house:list:${target}:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
+    new ButtonBuilder().setCustomId(`house:list:prev:${target}:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
+    new ButtonBuilder().setCustomId(`house:list:refresh:${target}:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`house:list:next:${target}:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
   )];
   return { embeds: [embed], components, flags: MessageFlags.Ephemeral, allowedMentions: silent };
 }
@@ -839,7 +842,8 @@ async function attendanceDirectoryPayload(i, page = 0) {
   if (!g?.config?.roleId) return { ...ep('ยังไม่ได้ตั้งค่า Role สมาชิก ใช้ `/setup` ก่อน'), components: [] };
   const roster = await optionalRoster(i.guild, g.config);
   if (!Array.isArray(roster)) {
-    return { ...ep('ยังอ่านรายชื่อสมาชิกไม่ได้\nให้เปิด SERVER MEMBERS INTENT ใน Discord Developer Portal และตั้ง `ENABLE_MEMBERS_INTENT=true` ใน Railway'), components: [] };
+    const detail = roster?.message ? `\nรายละเอียด: ${sanitize(roster.message).slice(0, 180)}` : '';
+    return { ...ep('ยังอ่านรายชื่อสมาชิกไม่ได้\nสาเหตุจริง: ' + (detail ? detail.replace('\nรายละเอียด: ', '') : 'ไม่ทราบสาเหตุ') + '\n\nตรวจเพิ่ม: บอตต้องมี GatewayIntentBits.GuildMembers ในโค้ด, เปิด SERVER MEMBERS INTENT ใน Developer Portal และ Railway ต้อง Deploy commit ล่าสุด'), components: [] };
   }
 
   const today = store.today();
@@ -882,9 +886,9 @@ async function attendanceDirectoryPayload(i, page = 0) {
     .setFooter({ text: 'หน้านี้คือดูรายชื่อเท่านั้น ไม่ใช่รายงานอัตโนมัติ 23:59' });
 
   const nav = [];
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0));
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary));
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1));
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:prev:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0));
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:refresh:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary));
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:next:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1));
 
   const payload = {
     embeds: [embed],
@@ -1351,8 +1355,13 @@ client.on(Events.InteractionCreate, async i => {
       }
       if (i.customId.startsWith('house:list:')) {
         const parts = i.customId.split(':');
-        const houseId = parts[2] && parts[2] !== 'all' ? parts[2] : null;
-        const page = Number(parts[3] || 0) || 0;
+        // รูปแบบใหม่: house:list:<action>:<houseId|all>:<page>
+        // รองรับรูปแบบเก่าชั่วคราว: house:list:<houseId|all>:<page>
+        const hasAction = ['prev', 'refresh', 'next'].includes(parts[2]);
+        const houseKey = hasAction ? parts[3] : parts[2];
+        const pageKey = hasAction ? parts[4] : parts[3];
+        const houseId = houseKey && houseKey !== 'all' ? houseKey : null;
+        const page = Number(pageKey || 0) || 0;
         const payload = houseDirectoryPayload(store.getGuild(i.guildId), page, houseId);
         delete payload.flags;
         return await i.update(payload);
