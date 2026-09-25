@@ -94,12 +94,20 @@ async function announce(guild, channelId, message) {
 }
 // หนึ่งข้อความรายงานต่อวันในห้อง Discord; อัปเดตข้อความเดิมทุกครั้งที่เช็กชื่อ
 const dashboardQueues = new Map();
-async function optionalRoster(guild, config) {
+const rosterCache = new Map();
+const ROSTER_CACHE_MS = 120000;
+async function optionalRoster(guild, config, force = false) {
+  const key = `${guild.id}:${config.roleId || 'none'}`;
+  const cached = rosterCache.get(key);
+  if (!force && cached && Date.now() - cached.at < ROSTER_CACHE_MS) return cached.members;
   try {
     const members = await guild.members.fetch({ withPresences: false });
-    return [...members.values()].filter(m => !m.user.bot && m.roles.cache.has(config.roleId));
+    const roster = [...members.values()].filter(m => !m.user.bot && m.roles.cache.has(config.roleId));
+    rosterCache.set(key, { at: Date.now(), members: roster });
+    return roster;
   } catch (error) {
     console.error('อ่านสมาชิกเพื่อรายงานไม่ได้:', error?.code || '', error?.message || error);
+    if (cached?.members?.length) return cached.members;
     return { __error: true, message: error?.message || String(error), code: error?.code || null };
   }
 }
@@ -774,54 +782,46 @@ function houseDirectoryRows(g, houseId = null) {
 }
 function houseDirectoryPayload(g, page = 0, houseId = null) {
   const selectedHouse = houseId ? (g?.houses || []).find(h => h.id === houseId) : null;
-  const rows = houseDirectoryRows(g, houseId);
   if (houseId && !selectedHouse) return { ...ep('ไม่พบบ้านนี้'), components: [] };
-  if (!rows.length) return { ...ep('📋 ยังไม่มีรายชื่อบ้าน ใช้ `/house add` และ `/house member add` ก่อน'), components: [] };
-  const totalPages = Math.max(1, Math.ceil(rows.length / HOUSE_DIRECTORY_PAGE_SIZE));
-  page = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
-  const start = page * HOUSE_DIRECTORY_PAGE_SIZE;
-  const chunk = rows.slice(start, start + HOUSE_DIRECTORY_PAGE_SIZE);
-
-  const counts = { present: 0, late: 0, leave: 0, missing: 0 };
-  for (const row of rows) {
-    const st = row.record?.status;
-    if (st === 'present') counts.present++;
-    else if (st === 'late') counts.late++;
-    else if (st === 'leave') counts.leave++;
-    else counts.missing++;
-  }
-
-  const lines = [];
-  let lastHouseId = null;
-  for (const [idx, row] of chunk.entries()) {
-    if (!houseId && row.house.id !== lastHouseId) {
-      lines.push(`\n🏠 **${sanitize(row.house.name)}**${row.house.leaderId ? ` — หัวหน้า <@${row.house.leaderId}>` : ''}`);
-      lastHouseId = row.house.id;
+  const houses = (g?.houses || []).filter(h => !houseId || h.id === houseId);
+  if (!houses.length) return { ...ep('📋 ยังไม่มีรายชื่อบ้าน ใช้ `/house add` และ `/house member add` ก่อน'), components: [] };
+  const day = g?.houseAttendance?.[store.today()] || {};
+  const lines = [selectedHouse ? `📋 **รายชื่อเช็กชื่อบ้าน ${sanitize(selectedHouse.name)}**` : '📋 **รายชื่อเช็กชื่อตามบ้านทั้งหมด**', `วันที่: ${store.today()}`];
+  for (const h of houses) {
+    const records = day[h.id] || {};
+    const memberIds = h.memberIds || [];
+    const groups = { present: [], late: [], leave: [], missing: [] };
+    for (const id of memberIds) {
+      const st = records[id]?.status;
+      if (st === 'present') groups.present.push(id);
+      else if (st === 'late') groups.late.push(id);
+      else if (st === 'leave') groups.leave.push(id);
+      else groups.missing.push(id);
     }
-    if (!row.userId) lines.push(`**${start + idx + 1}.** ยังไม่มีลูกบ้าน`);
-    else {
-      lines.push(`**${start + idx + 1}.** <@${row.userId}>`);
-      lines.push(`└ ${houseRecordLine(row.record)}`);
-    }
+    const show = (title, arr, statusKey) => {
+      lines.push(`\n${title} (${arr.length} คน)`);
+      if (!arr.length) { lines.push('ไม่มี'); return; }
+      arr.forEach((id, idx) => {
+        const r = records[id];
+        const time = r?.time || (r?.at ? String(r.at).slice(11, 16) : '');
+        const reason = r?.reason ? ` (${sanitize(r.reason).slice(0, 80)})` : '';
+        lines.push(`${idx + 1}. <@${id}>${time ? ` เวลา ${time}` : ''}${reason}`);
+      });
+    };
+    lines.push(`\n🏠 **${sanitize(h.name)}**${h.leaderId ? ` — หัวหน้า <@${h.leaderId}>` : ''}`);
+    if (!memberIds.length) { lines.push('ยังไม่มีลูกบ้าน'); continue; }
+    show('✅ มา', groups.present, 'present');
+    show('🕒 มาสาย', groups.late, 'late');
+    show('📝 ลา', groups.leave, 'leave');
+    show('⬜ ยังไม่เช็ก', groups.missing, 'missing');
   }
-
-  const title = selectedHouse ? `📋 รายชื่อลูกบ้าน • ${sanitize(selectedHouse.name)}` : '📋 รายชื่อลูกบ้านทั้งหมด';
   const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(lines.join('\n').trim().slice(0, 3900))
-    .addFields(
-      { name: 'วันที่', value: store.today(), inline: true },
-      { name: 'หน้า', value: `${page + 1}/${totalPages}`, inline: true },
-      { name: 'จำนวนรายชื่อ', value: `${rows.filter(x => x.userId).length} คน`, inline: true },
-      { name: 'สรุปสถานะ', value: `✅ มา ${counts.present} • 🕒 มาสาย ${counts.late} • 📝 ลา ${counts.leave} • ⬜ ยังไม่เช็ก ${counts.missing}`, inline: false }
-    )
-    .setFooter({ text: selectedHouse ? 'รายชื่อนี้แยกตามบ้าน และเชื่อมกับสถานะเช็กชื่อบ้านวันนี้' : 'รายชื่อนี้รวมทุกบ้านและเชื่อมกับสถานะเช็กชื่อบ้านวันนี้' });
-
+    .setTitle(selectedHouse ? `📋 รายชื่อบ้าน ${sanitize(selectedHouse.name)}` : '📋 รายชื่อเช็กชื่อตามบ้าน')
+    .setDescription(lines.join('\n').slice(0, 3900))
+    .setFooter({ text: 'เช็กชื่อบ้านแยกจากเช็กชื่อปกติ • แยกตามสถานะ มา / มาสาย / ลา / ยังไม่เช็ก' });
   const target = houseId || 'all';
   const components = [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`house:list:prev:${target}:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
-    new ButtonBuilder().setCustomId(`house:list:refresh:${target}:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`house:list:next:${target}:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
+    new ButtonBuilder().setCustomId(`house:list:refresh:${target}:0`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary)
   )];
   return { embeds: [embed], components, flags: MessageFlags.Ephemeral, allowedMentions: silent };
 }
@@ -842,8 +842,8 @@ async function attendanceDirectoryPayload(i, page = 0) {
   if (!g?.config?.roleId) return { ...ep('ยังไม่ได้ตั้งค่า Role สมาชิก ใช้ `/setup` ก่อน'), components: [] };
   const roster = await optionalRoster(i.guild, g.config);
   if (!Array.isArray(roster)) {
-    const detail = roster?.message ? `\nรายละเอียด: ${sanitize(roster.message).slice(0, 180)}` : '';
-    return { ...ep('ยังอ่านรายชื่อสมาชิกไม่ได้\nสาเหตุจริง: ' + (detail ? detail.replace('\nรายละเอียด: ', '') : 'ไม่ทราบสาเหตุ') + '\n\nตรวจเพิ่ม: บอตต้องมี GatewayIntentBits.GuildMembers ในโค้ด, เปิด SERVER MEMBERS INTENT ใน Developer Portal และ Railway ต้อง Deploy commit ล่าสุด'), components: [] };
+    const msg = roster?.message || 'ไม่ทราบสาเหตุ';
+    return { ...ep(`ยังอ่านรายชื่อสมาชิกไม่ได้\nสาเหตุจริง: ${sanitize(msg).slice(0, 180)}\n\nถ้าเป็น rate limited ให้รอ 20–30 วินาทีแล้วกดใหม่`), components: [] };
   }
 
   const today = store.today();
@@ -851,52 +851,40 @@ async function attendanceDirectoryPayload(i, page = 0) {
   const rows = roster
     .map(m => ({ id: m.id, name: m.displayName || m.user?.username || m.id, record: records[m.id] || null }))
     .sort((a, b) => a.name.localeCompare(b.name, 'th'));
-
   if (!rows.length) return { ...ep('📋 ยังไม่มีสมาชิกใน Role ที่ใช้เช็กชื่อ'), components: [] };
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / ATTENDANCE_DIRECTORY_PAGE_SIZE));
-  page = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
-  const start = page * ATTENDANCE_DIRECTORY_PAGE_SIZE;
-  const chunk = rows.slice(start, start + ATTENDANCE_DIRECTORY_PAGE_SIZE);
-
-  const counts = { present: 0, late: 0, leave: 0, missing: 0 };
+  const groups = { present: [], late: [], leave: [], missing: [] };
   for (const row of rows) {
     const st = row.record?.status;
-    if (st === 'present') counts.present++;
-    else if (st === 'late') counts.late++;
-    else if (st === 'leave') counts.leave++;
-    else counts.missing++;
+    if (st === 'present') groups.present.push(row);
+    else if (st === 'late') groups.late.push(row);
+    else if (st === 'leave') groups.leave.push(row);
+    else groups.missing.push(row);
   }
-
-  const lines = [];
-  for (const [idx, row] of chunk.entries()) {
-    lines.push(`**${start + idx + 1}.** <@${row.id}>`);
-    lines.push(`└ ${attendanceRecordLine(row.record)}`);
-  }
+  const lines = [`📋 **รายชื่อเช็กชื่อปกติ**`, `วันที่: ${today}`, `สมาชิกทั้งหมด: ${rows.length} คน`];
+  const show = (title, arr) => {
+    lines.push(`\n${title} (${arr.length} คน)`);
+    if (!arr.length) { lines.push('ไม่มี'); return; }
+    arr.forEach((row, idx) => {
+      const r = row.record;
+      const time = r?.time || (r?.at ? String(r.at).slice(11, 16) : '');
+      const reason = r?.reason ? ` (${sanitize(r.reason).slice(0, 80)})` : '';
+      lines.push(`${idx + 1}. <@${row.id}>${time ? ` เวลา ${time}` : ''}${reason}`);
+    });
+  };
+  show('✅ มา', groups.present);
+  show('🕒 มาสาย', groups.late);
+  show('📝 ลา', groups.leave);
+  show('⬜ ยังไม่เช็ก', groups.missing);
 
   const embed = new EmbedBuilder()
-    .setTitle('📋 ดูรายชื่อสมาชิกเช็กชื่อปกติ')
+    .setTitle('📋 รายชื่อเช็กชื่อปกติ')
     .setDescription(lines.join('\n').slice(0, 3900))
-    .addFields(
-      { name: 'วันที่', value: today, inline: true },
-      { name: 'หน้า', value: `${page + 1}/${totalPages}`, inline: true },
-      { name: 'สมาชิกทั้งหมด', value: `${rows.length} คน`, inline: true },
-      { name: 'สรุปสถานะ', value: `✅ มา ${counts.present} • 🕒 มาสาย ${counts.late} • 📝 ลา ${counts.leave} • ⬜ ยังไม่เช็ก ${counts.missing}`, inline: false }
-    )
-    .setFooter({ text: 'หน้านี้คือดูรายชื่อเท่านั้น ไม่ใช่รายงานอัตโนมัติ 23:59' });
-
-  const nav = [];
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:prev:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0));
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:refresh:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary));
-  nav.push(new ButtonBuilder().setCustomId(`attendance:list:next:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1));
-
-  const payload = {
-    embeds: [embed],
-    components: [new ActionRowBuilder().addComponents(nav)],
-    flags: MessageFlags.Ephemeral,
-    allowedMentions: silent
-  };
-  return payload;
+    .setFooter({ text: 'แยกตามสถานะ มา / มาสาย / ลา / ยังไม่เช็ก' });
+  const components = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('attendance:list:refresh:0').setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary)
+  )];
+  return { embeds: [embed], components, flags: MessageFlags.Ephemeral, allowedMentions: silent };
 }
 
 function houseListText(g) {
@@ -1914,18 +1902,6 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         }
         return await i.reply(ep(`ส่งแผงเช็กชื่อตามบ้านแบบแยกบ้านไปที่ ${target} แล้ว (${sent} บ้าน)`));
       }
-      if (sub === 'add') {
-        const house = store.houseAdd(i.guildId, i.options.getString('name', true));
-        return await i.reply(ep(`เพิ่มบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
-      }
-      if (sub === 'remove') {
-        const house = store.houseRemove(i.guildId, i.options.getString('name', true));
-        return await i.reply(ep(`ลบบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
-      }
-      if (sub === 'list') {
-        const g = store.getGuild(i.guildId);
-        return await i.reply(ep('🏠 **รายชื่อบ้าน**\n' + houseListText(g)));
-      }
       if (group === 'leader' && sub === 'set') {
         const house = store.houseLeaderSet(i.guildId, i.options.getString('house', true), i.options.getUser('user', true).id);
         return await i.reply(ep(`ตั้งหัวหน้าบ้านแล้ว\nบ้าน: **${sanitize(house.name)}**\nหัวหน้า: <@${house.leaderId}>`));
@@ -1937,6 +1913,18 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (group === 'member' && sub === 'remove') {
         const house = store.houseMemberRemove(i.guildId, i.options.getString('house', true), i.options.getUser('user', true).id);
         return await i.reply(ep(`เอาลูกบ้านออกแล้ว\nบ้าน: **${sanitize(house.name)}**`));
+      }
+      if (sub === 'add') {
+        const house = store.houseAdd(i.guildId, i.options.getString('name', true));
+        return await i.reply(ep(`เพิ่มบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
+      }
+      if (sub === 'remove') {
+        const house = store.houseRemove(i.guildId, i.options.getString('name', true));
+        return await i.reply(ep(`ลบบ้านแล้ว: 🏠 **${sanitize(house.name)}**`));
+      }
+      if (sub === 'list') {
+        const g = store.getGuild(i.guildId);
+        return await i.reply(ep('🏠 **รายชื่อบ้าน**\n' + houseListText(g)));
       }
     }
 
