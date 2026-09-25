@@ -87,6 +87,17 @@ function canUseDelivery(i, g) {
 }
 function manager(i) { return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild); }
 function ep(content) { return { content, flags: MessageFlags.Ephemeral, allowedMentions: silent }; }
+function longEmbed(title, description, color = 0x5865F2) {
+  return {
+    embeds: [new EmbedBuilder()
+      .setTitle(String(title || 'รายงาน').slice(0, 250))
+      .setDescription(String(description || '-').slice(0, 4090))
+      .setColor(color)
+      .setTimestamp()],
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: silent
+  };
+}
 function configOf(i) {
   const g = store.getGuild(i.guildId);
   if (!g?.config) throw new Error('ยังไม่ได้ตั้งค่า กรุณาให้ผู้ดูแลใช้ /setup ก่อน');
@@ -2034,12 +2045,12 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (i.customId === 'admin:discipline') {
         const text = disciplineReportText(g, roster, store.today(), 25);
         if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
-        return await i.editReply(text);
+        return await i.editReply(longEmbed(`🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22));
       }
       if (i.customId === 'admin:weekly') {
         const payload = weeklyReportPayload(i.guildId, g, roster, store.today());
         if (weeklyLogWebhookUrl) postGenericWebhook(weeklyLogWebhookUrl, payload, 'weekly').catch(console.error);
-        return await i.editReply(payload.embeds[0].description);
+        return await i.editReply(longEmbed(`📊 สรุปรายสัปดาห์ • ${store.today()}`, payload.embeds?.[0]?.description || '-', 0x9B59B6));
       }
       if (i.customId === 'admin:backup') {
         if (backupLogWebhookUrl) postGenericWebhook(backupLogWebhookUrl, backupPayload(i.guildId, g), 'backup').catch(console.error);
@@ -2346,7 +2357,7 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
       const text = disciplineReportText(g, roster, store.today(), 25);
       if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
-      return await i.editReply(text);
+      return await i.editReply(longEmbed(`🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22));
     }
     if (i.commandName === 'admin') {
       if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
