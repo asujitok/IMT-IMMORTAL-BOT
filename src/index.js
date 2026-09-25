@@ -47,6 +47,94 @@ function configOf(i) {
   if (!g?.config) throw new Error('ยังไม่ได้ตั้งค่า กรุณาให้ผู้ดูแลใช้ /setup ก่อน');
   return g;
 }
+
+function roleHas(member, roleId) {
+  const roles = member?.roles;
+  return Boolean(roles?.cache?.has(roleId) || roles?.includes?.(roleId));
+}
+function lockerManager(i, g = null) {
+  const data = g || store.getGuild(i.guildId);
+  if (i.guild?.ownerId === i.user.id || manager(i)) return true;
+  return (data?.lockerManagerRoleIds || []).some(roleId => roleHas(i.member, roleId));
+}
+function requireLockerManager(i, g = null) {
+  if (!lockerManager(i, g)) throw new Error('คุณไม่มีสิทธิ์จัดการตู้แก๊ง');
+}
+function lockerSummaryText(g) {
+  const summary = store.lockerSummary(g);
+  const rows = summary.rows;
+  const itemLines = rows.length
+    ? rows.map((x, idx) => `${idx + 1}. ${sanitize(x.name)} — ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`)
+    : ['ยังไม่มีของในตู้'];
+  return `📦 **[IMT] IMMORTAL — ตู้แก๊ง**\n\n` +
+    `📋 จำนวนรายการทั้งหมด: **${summary.totalItems.toLocaleString('en-US')} รายการ**\n` +
+    `💰 มูลค่าเงินรวม: **${summary.moneyTotal.toLocaleString('en-US')} บาท**\n\n` +
+    itemLines.join('\n');
+}
+function lockerEmbed(g) {
+  const summary = store.lockerSummary(g);
+  const rows = summary.rows;
+  const list = rows.length
+    ? rows.map((x, idx) => `${idx + 1}. ${sanitize(x.name)} — **${Number(x.quantity || 0).toLocaleString('en-US')}** ${sanitize(x.unit)}`).join('\n')
+    : 'ยังไม่มีของในตู้';
+  return new EmbedBuilder()
+    .setTitle('📦 [IMT] IMMORTAL • Dashboard ตู้แก๊ง')
+    .setDescription(`📋 จำนวนรายการทั้งหมด: **${summary.totalItems.toLocaleString('en-US')} รายการ**\n💰 มูลค่าเงินรวม: **${summary.moneyTotal.toLocaleString('en-US')} บาท**`)
+    .addFields({ name: 'ของในตู้', value: list.slice(0, 1000), inline: false })
+    .setColor(0x2F3136)
+    .setFooter({ text: 'ตู้แก๊งแยกจากระบบส่งของ • สมาชิกดูได้ ผู้จัดการตู้เท่านั้นที่แก้ไขได้' })
+    .setTimestamp(new Date());
+}
+function lockerButtons() {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('locker:check').setLabel('📋 เช็คของ').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('locker:add').setLabel('➕ เพิ่มของ').setStyle(ButtonStyle.Success)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('locker:remove').setLabel('➖ ลบของ').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('locker:edit').setLabel('✏️ แก้ไขของ').setStyle(ButtonStyle.Primary)
+    )
+  ];
+}
+function lockerAddModal() {
+  return new ModalBuilder().setTitle('➕ เพิ่มของเข้าตู้แก๊ง').setCustomId('locker:add:modal')
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของ').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่เพิ่ม').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 5').setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วย').setStyle(TextInputStyle.Short).setPlaceholder('ชิ้น / บาท').setValue('ชิ้น').setMaxLength(20).setRequired(true))
+    );
+}
+function lockerRemoveModal() {
+  return new ModalBuilder().setTitle('➖ ลบของจากตู้แก๊ง').setCustomId('locker:remove:modal')
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของ').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่ลบออก').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 2').setRequired(true))
+    );
+}
+function lockerEditModal() {
+  return new ModalBuilder().setTitle('✏️ แก้ไขของในตู้แก๊ง').setCustomId('locker:edit:modal')
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของเดิม').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('newname').setLabel('ชื่อใหม่ (เว้นว่าง = ใช้ชื่อเดิม)').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนใหม่').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 10').setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วยใหม่ (เว้นว่าง = ใช้หน่วยเดิม)').setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(false))
+    );
+}
+function parsePositiveInt(raw, max = 1000000000000) {
+  const value = String(raw || '').trim();
+  if (!/^\d{1,13}$/.test(value)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม');
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new Error(`จำนวนต้องอยู่ระหว่าง 1 ถึง ${max.toLocaleString('en-US')}`);
+  return n;
+}
+function parseNonNegativeInt(raw, max = 1000000000000) {
+  const value = String(raw || '').trim();
+  if (!/^\d{1,13}$/.test(value)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม');
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0 || n > max) throw new Error(`จำนวนต้องอยู่ระหว่าง 0 ถึง ${max.toLocaleString('en-US')}`);
+  return n;
+}
 async function announce(guild, channelId, message) {
   try {
     const channel = await guild.channels.fetch(channelId);
@@ -521,6 +609,25 @@ client.on(Events.InteractionCreate, async i => {
         return await i.reply({ ...ep(g.items.length > 25 ? 'แสดง 25 รายการแรก รายการอื่นใช้ /checkitem' : 'เลือกของที่ต้องตรวจ'),
           components: [new ActionRowBuilder().addComponents(select)] });
       }
+      if (i.customId === 'locker:check') {
+        const g = configOf(i);
+        if (!onlyTeam(i, g) && !lockerManager(i, g)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
+        const embed = lockerEmbed(store.getGuild(i.guildId));
+        if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
+        return await i.update({ embeds: [embed], components: lockerButtons(), allowedMentions: silent });
+      }
+      if (i.customId === 'locker:add') {
+        const g = configOf(i); requireLockerManager(i, g);
+        return await i.showModal(lockerAddModal());
+      }
+      if (i.customId === 'locker:remove') {
+        const g = configOf(i); requireLockerManager(i, g);
+        return await i.showModal(lockerRemoveModal());
+      }
+      if (i.customId === 'locker:edit') {
+        const g = configOf(i); requireLockerManager(i, g);
+        return await i.showModal(lockerEditModal());
+      }
     }
     if (i.isStringSelectMenu() && i.customId === 'inventory:select') {
       const g = configOf(i);
@@ -538,6 +645,30 @@ client.on(Events.InteractionCreate, async i => {
       modal.addComponents(new ActionRowBuilder().addComponents(qty),
         new ActionRowBuilder().addComponents(condition), new ActionRowBuilder().addComponents(note));
       return await i.showModal(modal);
+    }
+    if (i.isModalSubmit() && i.customId === 'locker:add:modal') {
+      const g = configOf(i); requireLockerManager(i, g);
+      const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const x = store.lockerAdd(i.guildId, i.fields.getTextInputValue('name'), qty, i.fields.getTextInputValue('unit') || 'ชิ้น');
+      const fresh = store.getGuild(i.guildId);
+      return await i.reply({ ...ep(`➕ เพิ่มของแล้ว: ${sanitize(x.name)} +${qty.toLocaleString('en-US')} ${sanitize(x.unit)}\nยอดปัจจุบัน: ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}\n\n${lockerSummaryText(fresh).slice(0, 1500)}`) });
+    }
+    if (i.isModalSubmit() && i.customId === 'locker:remove:modal') {
+      const g = configOf(i); requireLockerManager(i, g);
+      const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const x = store.lockerRemove(i.guildId, i.fields.getTextInputValue('name'), qty);
+      const left = x.deleted ? 'ลบรายการออกแล้ว' : `คงเหลือ ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`;
+      const fresh = store.getGuild(i.guildId);
+      return await i.reply({ ...ep(`➖ ลบของแล้ว: ${sanitize(x.name)} -${qty.toLocaleString('en-US')} ${sanitize(x.unit)}\n${left}\n\n${lockerSummaryText(fresh).slice(0, 1500)}`) });
+    }
+    if (i.isModalSubmit() && i.customId === 'locker:edit:modal') {
+      const g = configOf(i); requireLockerManager(i, g);
+      const qty = parseNonNegativeInt(i.fields.getTextInputValue('quantity'));
+      const unit = i.fields.getTextInputValue('unit').trim() || null;
+      const newName = i.fields.getTextInputValue('newname').trim() || null;
+      const x = store.lockerEdit(i.guildId, i.fields.getTextInputValue('name'), qty, unit, newName);
+      const fresh = store.getGuild(i.guildId);
+      return await i.reply({ ...ep(`✏️ แก้ไขของแล้ว: ${sanitize(x.name)} — ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}\n\n${lockerSummaryText(fresh).slice(0, 1500)}`) });
     }
     if (i.isModalSubmit() && i.customId === 'delivery:modal') {
       const raw = i.fields.getTextInputValue('quantity').trim();
@@ -579,7 +710,7 @@ client.on(Events.InteractionCreate, async i => {
       if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
       await i.deferReply({ flags: MessageFlags.Ephemeral });
       const g = configOf(i), kind = i.options.getString('type', true);
-      const targetId = kind === 'attendance' ? g.config.attendanceChannelId : g.config.inventoryChannelId;
+      const targetId = kind === 'attendance' ? g.config.attendanceChannelId : kind === 'inventory' ? g.config.inventoryChannelId : i.channelId;
       const channel = await i.guild.channels.fetch(targetId);
       if (!channel?.isTextBased()) throw new Error('ไม่พบห้องหรือบอตไม่มีสิทธิ์เข้าถึง');
       let components, embed;
@@ -640,26 +771,55 @@ client.on(Events.InteractionCreate, async i => {
       }
     }
     if (i.commandName === 'locker') {
-      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
-      configOf(i);
+      const g = configOf(i);
+      const group = i.options.getSubcommandGroup(false);
       const sub = i.options.getSubcommand();
+      if (group === 'role') {
+        if (!manager(i) && i.guild?.ownerId !== i.user.id) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์เท่านั้นที่ตั้งค่ายศตู้แก๊งได้');
+        if (sub === 'add') {
+          const role = i.options.getRole('role', true);
+          if (role.id === i.guildId) throw new Error('ห้ามใช้ @everyone เป็นยศผู้จัดการตู้');
+          const ids = store.lockerRoleAdd(i.guildId, role.id);
+          return await i.reply(ep(`เพิ่มยศผู้จัดการตู้แก๊งแล้ว: ${role}\nยศที่แก้ไขตู้ได้ทั้งหมด: ${ids.length ? ids.map(id => '<@&' + id + '>').join(', ') : 'ยังไม่มี'}`));
+        }
+        if (sub === 'remove') {
+          const role = i.options.getRole('role', true);
+          const ids = store.lockerRoleRemove(i.guildId, role.id);
+          return await i.reply(ep(`ลบยศผู้จัดการตู้แก๊งแล้ว: ${role}\nยศที่แก้ไขตู้ได้ทั้งหมด: ${ids.length ? ids.map(id => '<@&' + id + '>').join(', ') : 'ยังไม่มี'}`));
+        }
+        const ids = store.lockerRoles(i.guildId);
+        return await i.reply(ep('🔐 **ยศที่สามารถแก้ไขตู้แก๊ง**\n' + (ids.length ? ids.map((id, idx) => `${idx + 1}. <@&${id}>`).join('\n') : 'ยังไม่มี — ผู้ดูแลเซิร์ฟเวอร์ยังแก้ไขได้เสมอ')));
+      }
+      if (sub === 'panel') {
+        requireLockerManager(i, g);
+        const channel = i.channel;
+        if (!channel?.isTextBased()) throw new Error('ห้องนี้ไม่รองรับการส่งข้อความ');
+        const embed = lockerEmbed(store.getGuild(i.guildId));
+        if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
+        await channel.send({ embeds: [embed], components: lockerButtons(), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+        return await i.reply(ep('ส่ง Dashboard ตู้แก๊งและปุ่มจัดการไปที่ห้องนี้แล้ว'));
+      }
+      if (sub === 'list') {
+        if (!onlyTeam(i, g) && !lockerManager(i, g)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
+        return await i.reply(ep(lockerSummaryText(g).slice(0, 1900)));
+      }
+      requireLockerManager(i, g);
       if (sub === 'add') {
-        const x = store.lockerAdd(i.guildId, i.options.getString('name', true),
-          i.options.getInteger('quantity', true), i.options.getString('unit') || 'ชิ้น');
-        return await i.reply(ep(`เพิ่มตู้แก๊ง: ${sanitize(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}`));
+        const qty = i.options.getInteger('quantity', true);
+        const x = store.lockerAdd(i.guildId, i.options.getString('name', true), qty, i.options.getString('unit') || 'ชิ้น');
+        return await i.reply(ep(`เพิ่มตู้แก๊ง: ${sanitize(x.name)} +${qty.toLocaleString('en-US')} ${sanitize(x.unit)}\nยอดปัจจุบัน: ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`));
       }
       if (sub === 'edit') {
         const x = store.lockerEdit(i.guildId, i.options.getString('name', true),
-          i.options.getInteger('quantity', true), i.options.getString('unit'));
-        return await i.reply(ep(`แก้ไขตู้แก๊ง: ${sanitize(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}`));
+          i.options.getInteger('quantity', true), i.options.getString('unit'), i.options.getString('newname'));
+        return await i.reply(ep(`แก้ไขตู้แก๊ง: ${sanitize(x.name)} ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`));
       }
       if (sub === 'remove') {
-        const x = store.lockerRemove(i.guildId, i.options.getString('name', true));
-        return await i.reply(ep(`ลบรายการ ${sanitize(x.name)} จากตู้แก๊งแล้ว (ประวัติการส่งของยังอยู่)`));
+        const qty = i.options.getInteger('quantity');
+        const x = store.lockerRemove(i.guildId, i.options.getString('name', true), qty);
+        if (qty) return await i.reply(ep(`ลบจำนวนจากตู้แก๊ง: ${sanitize(x.name)} -${qty.toLocaleString('en-US')} ${sanitize(x.unit)}${x.deleted ? '\nรายการนี้เหลือ 0 และถูกลบออกแล้ว' : `\nคงเหลือ ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`}`));
+        return await i.reply(ep(`ลบรายการ ${sanitize(x.name)} จากตู้แก๊งแล้ว`));
       }
-      const rows = store.getGuild(i.guildId).locker || [];
-      return await i.reply(ep('📦 **[IMT] IMMORTAL — ตู้แก๊ง**\n' +
-        (rows.length ? rows.map((x, idx) => `${idx + 1}. ${sanitize(x.name)} — ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}`).join('\n').slice(0, 1800) : 'ยังไม่มีของในตู้')));
     }
     if (i.commandName === 'checkin') return await beginAttendance(i,
       i.options.getString('status', true), i.options.getString('reason') || '',
