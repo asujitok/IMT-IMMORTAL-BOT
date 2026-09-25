@@ -6,25 +6,30 @@ const pending = new Map();
 const active = new Map();
 const TTL = 5 * 60 * 1000;
 const MAX_QUANTITY = 1000000000000;
-const STATUS = Object.freeze({ pending: '⏳ รอตรวจ', approved: '✅ ส่งแล้ว', rejected: '❌ ขาดส่ง' });
+const STATUS = Object.freeze({ pending: '⏳ รอตรวจ', approved: '✅ รับแล้ว', rejected: '❌ ไม่รับ' });
 
 function validName(name) {
   const value = String(name || '').trim();
   if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
   return value;
 }
+function validUnit(unit = 'ชิ้น') {
+  const value = String(unit || 'ชิ้น').trim();
+  if (!value || value.length > 20 || /[\r\n]/.test(value)) throw new Error('หน่วยต้องมี 1–20 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
+  return value;
+}
 function validQuantity(qty) {
   if (!Number.isSafeInteger(qty) || qty < 1 || qty > MAX_QUANTITY) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
   return qty;
 }
-function prepare(guildId, userId, name, quantity, date, now = Date.now()) {
-  name = validName(name); quantity = validQuantity(quantity);
+function prepare(guildId, userId, name, quantity, date, unit = 'ชิ้น', now = Date.now()) {
+  name = validName(name); quantity = validQuantity(quantity); unit = validUnit(unit);
   const key = `${guildId}:${userId}`;
   const oldId = active.get(key);
   if (oldId) pending.delete(oldId);
   for (const [id, p] of pending) if (now > p.expiresAt) pending.delete(id);
   const id = randomUUID();
-  const record = { id, guildId, userId, name, quantity, date, expiresAt: now + TTL };
+  const record = { id, guildId, userId, name, quantity, unit, date, expiresAt: now + TTL };
   pending.set(id, record); active.set(key, id);
   return record;
 }
@@ -39,7 +44,7 @@ function take(id, guildId, userId, now = Date.now()) {
 }
 function cancel(id, guildId, userId) { take(id, guildId, userId); }
 
-// ส่งของบันทึกแยกตามรายวัน และไม่แก้ไขจำนวนในตู้แก๊งโดยเด็ดขาด
+// ส่งของบันทึกแยกตามรายวัน และไม่แก้ไขจำนวนในตู้แก๊งจนกว่าผู้ดูแลจะเลือก "นำเข้าตู้"
 function submit(guildId, p) {
   return store.update(guildId, g => {
     g.deliveries ||= {};
@@ -47,8 +52,8 @@ function submit(guildId, p) {
     const sameItem = g.deliveries[p.date].filter(x => x.userId === p.userId && x.name.toLocaleLowerCase() === p.name.toLocaleLowerCase() && !x.supersededBy);
     if (sameItem.some(x => x.status === 'pending')) throw new Error('คุณมีรายการนี้ที่รอตรวจอยู่แล้ว ไม่ต้องส่งซ้ำ');
     const record = { id: randomUUID(), seq: g.deliveries[p.date].length + 1, userId: p.userId, name: p.name,
-      quantity: p.quantity, at: new Date().toISOString(), status: 'pending', messageId: null, channelId: null,
-      reviewedBy: null, reviewedAt: null };
+      quantity: p.quantity, unit: p.unit || 'ชิ้น', at: new Date().toISOString(), status: 'pending', messageId: null, channelId: null,
+      reviewedBy: null, reviewedAt: null, lockerAction: null, lockerActionBy: null, lockerActionAt: null };
     for (const prev of sameItem) if (prev.status === 'rejected') prev.supersededBy = record.id;
     g.deliveries[p.date].push(record);
     return record;
@@ -80,6 +85,14 @@ function findByMessage(guildId, messageId) {
   }
   return null;
 }
+function findById(guildId, id) {
+  const g = store.getGuild(guildId);
+  for (const [date, entries] of Object.entries(g?.deliveries || {})) {
+    const entry = entries.find(x => x.id === id);
+    if (entry) return { date, entry };
+  }
+  return null;
+}
 function review(guildId, date, id, result, reviewerId) {
   if (!['approved','rejected'].includes(result)) throw new Error('ผลตรวจไม่ถูกต้อง');
   return store.update(guildId, g => {
@@ -87,10 +100,20 @@ function review(guildId, date, id, result, reviewerId) {
     if (!entry) throw new Error('ไม่พบรายการส่งของ');
     if (entry.supersededBy) throw new Error('รายการนี้ถูกแทนที่แล้ว ให้ตรวจรายการล่าสุด');
     if (entry.status === result) return { entry, unchanged: true };
-    // ✅/❌ เปลี่ยนเฉพาะสถานะการส่งของ ไม่สร้าง/เพิ่ม/หัก/ลบของในตู้แก๊ง
-    // ผู้ดูแลต้องจัดการตู้แก๊งเองผ่าน /locker add, /locker edit, /locker remove
     entry.status = result; entry.reviewedBy = reviewerId; entry.reviewedAt = new Date().toISOString();
+    if (result === 'rejected') { entry.lockerAction = null; entry.lockerActionBy = null; entry.lockerActionAt = null; }
     return { entry, unchanged: false };
+  });
+}
+function markLockerAction(guildId, date, id, action, userId) {
+  if (!['imported','skipped'].includes(action)) throw new Error('การดำเนินการหลังรับของไม่ถูกต้อง');
+  return store.update(guildId, g => {
+    const entry = g.deliveries?.[date]?.find(x => x.id === id);
+    if (!entry) throw new Error('ไม่พบรายการส่งของ');
+    if (entry.status !== 'approved') throw new Error('ต้องรับของก่อนจึงจะเลือกนำเข้าตู้หรือไม่ดำเนินการได้');
+    if (entry.lockerAction && entry.lockerAction !== action) throw new Error('รายการนี้มีการเลือกดำเนินการหลังรับของไปแล้ว');
+    entry.lockerAction = action; entry.lockerActionBy = userId; entry.lockerActionAt = new Date().toISOString();
+    return entry;
   });
 }
 function list(g, date) { return (g.deliveries?.[date] || []).filter(x => !x.supersededBy); }
@@ -112,10 +135,10 @@ function summary(g, date, roster = null, cutoff = '20:00', currentTime = store.t
       (rows.length > visible.length ? `\n…และอีก ${rows.length - visible.length} คน` : '') : 'ไม่มี');
   };
   let lines = [`📦 **[IMT] IMMORTAL — สรุปส่งของ ${date}**`,
-    nl(groups.approved,'✅','ส่งแล้ว'), nl(groups.pending,'⏳','รอตรวจ'), nl(groups.rejected,'❌','ขาดส่ง')];
-  if (roster) lines.push(nl(groups.absent, currentTime >= cutoff ? '❌' : '⬜', currentTime >= cutoff ? 'ขาดส่ง (ยังไม่มีรายการ)' : 'ยังไม่ส่ง'));
+    nl(groups.approved,'✅','รับแล้ว'), nl(groups.pending,'⏳','รอตรวจ'), nl(groups.rejected,'❌','ไม่รับ')];
+  if (roster) lines.push(nl(groups.absent, currentTime >= cutoff ? '❌' : '⬜', currentTime >= cutoff ? 'ยังไม่ส่ง' : 'ยังไม่ส่ง'));
   else lines.push('หมายเหตุ: ยังไม่สามารถแสดงชื่อผู้ไม่ส่งทั้งหมดได้ ต้องเปิด SERVER MEMBERS INTENT และกำหนด Role สมาชิก');
   return lines.join('\n\n');
 }
-module.exports = { MAX_QUANTITY, STATUS, validName, validQuantity, prepare, take, cancel, submit,
-  attachMessage, removeUnposted, findByMessage, review, list, summary };
+module.exports = { MAX_QUANTITY, STATUS, validName, validUnit, validQuantity, prepare, take, cancel, submit,
+  attachMessage, removeUnposted, findByMessage, findById, review, markLockerAction, list, summary };
