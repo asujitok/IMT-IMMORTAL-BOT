@@ -59,15 +59,21 @@ test('สรุปหนึ่งครั้งต่อวันแยกแ�
   assert.equal(db.getGuild('test-server').inventory[date].user1[item.id].name, 'ดาบ');
 });
 
-test('ผู้ดูแลแก้ไขสถานะเช็กชื่อแทนสมาชิกและเก็บประวัติ', () => {
+test('ผู้ดูแลแก้ไขสถานะเช็กชื่อแทนสมาชิกและเก็บประวัติพร้อมเวลา', () => {
   const date = db.today(), user = '123456789012345678', admin = '987654321098765432';
-  db.attendanceAdminEdit('test-server', date, user, 'leave', 'แจ้งลาไว้ก่อน', admin);
+  db.attendanceAdminEdit('test-server', date, user, 'leave', 'แจ้งลาไว้ก่อน', admin, '18:15');
   assert.equal(db.getGuild('test-server').attendance[date][user].status, 'leave');
-  const result = db.attendanceAdminEdit('test-server', date, user, 'present', 'มาจริงแล้ว ยกเลิกลา', admin);
+  const result = db.attendanceAdminEdit('test-server', date, user, 'present', 'มาจริงแล้ว ยกเลิกลา', admin, '19:30');
   assert.equal(result.previous.status, 'leave');
   assert.equal(db.getGuild('test-server').attendance[date][user].status, 'present');
+  assert.equal(db.getGuild('test-server').attendance[date][user].at, new Date(`${date}T19:30:00+07:00`).toISOString());
   const rows = db.attendanceEditHistory('test-server', { userId: user, limit: 2 });
   assert.equal(rows[0].from, 'leave');
   assert.equal(rows[0].to, 'present');
   assert.equal(rows[0].actorId, admin);
+  assert.equal(rows[0].time, '19:30');
+});
+
+test('ผู้ดูแลแก้ไขเช็กชื่อด้วยเวลาไม่ถูกต้องไม่ได้', () => {
+  assert.throws(() => db.attendanceAdminEdit('test-server', db.today(), '123456789012345678', 'present', '', '987654321098765432', '25:99'), /เวลาไม่ถูกต้อง/);
 });
