@@ -286,12 +286,31 @@ function deliveryHistory(id, { userId = null, itemName = null, date = null, limi
   return rows.reverse().slice(0, Math.max(1, Math.min(Number(limit) || 10, 25)));
 }
 
+
+function deliveryResetRows(id, date) {
+  date = String(date || today()).trim();
+  return update(id, g => {
+    g.deliveries ||= {};
+    const removed = g.deliveries[date] || [];
+    g.deliveries[date] = [];
+    return { date, count: removed.length };
+  });
+}
+function deliveryResetItems(id) {
+  return update(id, g => {
+    g.deliveryItems ||= [];
+    const removed = g.deliveryItems;
+    g.deliveryItems = [];
+    return { count: removed.length, items: removed };
+  });
+}
+
 function markSent(id, date, kind) {
   update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
 }
 module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
   attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
-  deliveryItemUpsert, deliveryItemRemove, deliveryRoleAdd, deliveryRoleRemove,
+  deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
   deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
 };
