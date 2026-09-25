@@ -1276,10 +1276,12 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       let components, embed;
       if (kind === 'attendance') {
         components = [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('attendance:present').setLabel('✅ มา').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('attendance:late').setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('attendance:leave').setLabel('📝 ลา').setStyle(ButtonStyle.Secondary)
-        )];
+        new ButtonBuilder().setCustomId('attendance:present').setLabel('✅ มา').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('attendance:late').setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('attendance:leave').setLabel('📝 ลา').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('attendance:admin:edit').setLabel('🛠 แก้ไขเช็กชื่อ').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('attendance:admin:history').setLabel('📜 ประวัติแก้ไข').setStyle(ButtonStyle.Secondary)
+      )];
         embed = new EmbedBuilder().setTitle('📋 [IMT] IMMORTAL • เช็กชื่อรายวัน').setDescription('✅ มา: **18:00–23:59 น.**\n🕒 มาสาย / 📝 ลา: **00:00–23:59 น.** (แจ้งก่อน 18:00 ได้)\nลา 1 วันหรือหลายวันได้สูงสุด 31 วัน พร้อมเหตุผล\nเริ่มนับสายจากเวลาที่ผู้ดูแลตั้ง (เริ่มต้น 20:00 น.)\nต้องยืนยันก่อนบันทึก • ใช้ /history ดูประวัติย้อนหลัง');
       } else {
         components = [new ActionRowBuilder().addComponents(
