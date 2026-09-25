@@ -58,3 +58,16 @@ test('สรุปหนึ่งครั้งต่อวันแยกแ�
   db.removeItem('test-server', item.id);
   assert.equal(db.getGuild('test-server').inventory[date].user1[item.id].name, 'ดาบ');
 });
+
+test('ผู้ดูแลแก้ไขสถานะเช็กชื่อแทนสมาชิกและเก็บประวัติ', () => {
+  const date = db.today(), user = '123456789012345678', admin = '987654321098765432';
+  db.attendanceAdminEdit('test-server', date, user, 'leave', 'แจ้งลาไว้ก่อน', admin);
+  assert.equal(db.getGuild('test-server').attendance[date][user].status, 'leave');
+  const result = db.attendanceAdminEdit('test-server', date, user, 'present', 'มาจริงแล้ว ยกเลิกลา', admin);
+  assert.equal(result.previous.status, 'leave');
+  assert.equal(db.getGuild('test-server').attendance[date][user].status, 'present');
+  const rows = db.attendanceEditHistory('test-server', { userId: user, limit: 2 });
+  assert.equal(rows[0].from, 'leave');
+  assert.equal(rows[0].to, 'present');
+  assert.equal(rows[0].actorId, admin);
+});
