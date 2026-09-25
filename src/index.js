@@ -620,6 +620,65 @@ function attendanceActionWebhookPayload({ guildId, userId, status, reason = '', 
     }]
   };
 }
+
+function parseDiscordUserId(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^(?:<@!?)?(\d{5,25})>?$/) || text.match(/(\d{5,25})/);
+  if (!match) throw new Error('กรุณาใส่ mention สมาชิก หรือ Discord ID ให้ถูกต้อง');
+  return match[1];
+}
+function attendanceAdminEditModal(status) {
+  const modal = new ModalBuilder().setCustomId(`attendance:adminedit:${status}`)
+    .setTitle(`ผู้ดูแลแก้ไขเป็น ${attendanceStatusLabel(status).replace(/^[^ ]+\s*/, '')}`.slice(0, 45));
+  const member = new TextInputBuilder().setCustomId('member')
+    .setLabel('สมาชิก (mention หรือ Discord ID)')
+    .setPlaceholder('@สมาชิก หรือ 123456789012345678')
+    .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80);
+  const date = new TextInputBuilder().setCustomId('date')
+    .setLabel('วันที่ (YYYY-MM-DD)')
+    .setStyle(TextInputStyle.Short).setRequired(true).setValue(store.today()).setMaxLength(10);
+  const reason = new TextInputBuilder().setCustomId('reason')
+    .setLabel(status === 'present' ? 'เหตุผลการแก้ไข (ใส่หรือไม่ใส่ก็ได้)' : 'เหตุผลการแก้ไข')
+    .setPlaceholder(status === 'present' ? 'เช่น มาจริงแล้ว ยกเลิกลาวันนี้' : 'เช่น เปลี่ยนเป็นลา เพราะมีเหตุจำเป็น')
+    .setStyle(TextInputStyle.Paragraph).setRequired(status !== 'present').setMaxLength(250);
+  modal.addComponents(new ActionRowBuilder().addComponents(member),
+    new ActionRowBuilder().addComponents(date), new ActionRowBuilder().addComponents(reason));
+  return modal;
+}
+function attendanceEditHistoryText(g, limit = 10) {
+  const rows = (g.attendanceEditHistory || []).slice(-limit).reverse();
+  if (!rows.length) return '📜 **ประวัติแก้ไขเช็กชื่อ**\nยังไม่มีประวัติการแก้ไขโดยผู้ดูแล';
+  const status = v => v ? attendanceStatusLabel(v) : 'ลบสถานะ';
+  return '📜 **ประวัติแก้ไขเช็กชื่อล่าสุด**\n' + rows.map((x, idx) =>
+    `${idx + 1}. ${x.date} • <@${x.userId}>\n` +
+    `จาก: **${status(x.from)}** → เป็น: **${status(x.to)}**\n` +
+    `ผู้แก้ไข: <@${x.actorId || '0'}>${x.reason ? `\nเหตุผล: ${sanitize(x.reason)}` : ''}`
+  ).join('\n\n').slice(0, 1900);
+}
+function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, previous, status, reason, log }) {
+  return {
+    username: 'IMT Time Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: '🛠 TIME LOG — ผู้ดูแลแก้ไขเช็กชื่อ',
+      color: attendanceWebhookColor(status),
+      fields: [
+        { name: 'ผู้ดูแล', value: `<@${actorId}>`, inline: true },
+        { name: 'สมาชิก', value: `<@${targetId}>`, inline: true },
+        { name: 'วันที่', value: date, inline: true },
+        { name: 'สถานะเดิม', value: previous ? attendanceStatusLabel(previous.status) : 'ไม่มีข้อมูลเดิม', inline: true },
+        { name: 'สถานะใหม่', value: attendanceStatusLabel(status), inline: true },
+        previous?.reason ? { name: 'เหตุผลเดิม', value: sanitize(previous.reason), inline: false } : null,
+        reason ? { name: 'เหตุผลแก้ไข', value: sanitize(reason), inline: false } : null,
+        { name: 'รหัสแก้ไข', value: log?.id || '-', inline: true },
+        { name: 'Guild', value: guildId, inline: true }
+      ].filter(Boolean),
+      footer: { text: timeFooterText('Admin Edit') },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+
 function attendanceDailyGroups(g, date, roster = null) {
   const entries = Object.entries(g.attendance?.[date] || {});
   const groups = { present: [], late: [], leave: [] };
@@ -949,6 +1008,26 @@ client.on(Events.InteractionCreate, async i => {
         store.update(i.guildId, db => { if (db.historyViews?.[i.message.id]) db.historyViews[i.message.id].page = page; });
         return;
       }
+
+      if (i.customId === 'attendance:admin:edit') {
+        if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('attendance:adminchoice:present').setLabel('แก้เป็น ✅ มา').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('attendance:adminchoice:late').setLabel('แก้เป็น 🕒 มาสาย').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('attendance:adminchoice:leave').setLabel('แก้เป็น 📝 ลา').setStyle(ButtonStyle.Secondary)
+        );
+        return await i.reply({ ...ep('🛠 เลือกสถานะใหม่ที่ต้องการแก้ให้สมาชิก แล้วกรอกสมาชิก/วันที่/เหตุผล'), components: [row] });
+      }
+      if (i.customId === 'attendance:admin:history') {
+        if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+        return await i.reply(ep(attendanceEditHistoryText(store.getGuild(i.guildId), 10)));
+      }
+      if (i.customId.startsWith('attendance:adminchoice:')) {
+        if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+        const status = i.customId.substring('attendance:adminchoice:'.length);
+        if (!['present','late','leave'].includes(status)) throw new Error('สถานะใหม่ไม่ถูกต้อง');
+        return await i.showModal(attendanceAdminEditModal(status));
+      }
       if (i.customId.startsWith('attendance:confirm:')) {
         return await confirmAttendance(i, i.customId.substring('attendance:confirm:'.length));
       }
@@ -1139,6 +1218,22 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       const raw = i.fields.getTextInputValue('quantity').trim();
       if (!/^\d{1,13}$/.test(raw)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม 1–1,000,000,000,000');
       return await beginDelivery(i, i.fields.getTextInputValue('name'), Number(raw), i.fields.getTextInputValue('unit') || 'ชิ้น');
+    }
+
+    if (i.isModalSubmit() && i.customId.startsWith('attendance:adminedit:')) {
+      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+      const status = i.customId.substring('attendance:adminedit:'.length);
+      if (!['present','late','leave'].includes(status)) throw new Error('สถานะใหม่ไม่ถูกต้อง');
+      const targetId = parseDiscordUserId(i.fields.getTextInputValue('member'));
+      const date = i.fields.getTextInputValue('date').trim() || store.today();
+      const reason = i.fields.getTextInputValue('reason').trim();
+      const result = store.attendanceAdminEdit(i.guildId, date, targetId, status, reason, i.user.id);
+      if (date === store.today()) {
+        try { await refreshDashboard(i.guild, date); } catch (e) { console.error('รีเฟรชรายงานหลังผู้ดูแลแก้เช็กชื่อ:', e.message); }
+      }
+      postTimeWebhook(attendanceAdminEditWebhookPayload({ guildId: i.guildId, targetId, actorId: i.user.id, date, previous: result.previous, status, reason, log: result.log }), 'time admin edit')
+        .catch(e => console.error('ส่ง Time_log การแก้ไขเช็กชื่อไม่สำเร็จ:', e.message));
+      return await i.reply(ep(`🛠 แก้ไขเช็กชื่อแล้ว\nสมาชิก: <@${targetId}>\nวันที่: ${date}\nจาก: ${result.previous ? attendanceStatusLabel(result.previous.status) : 'ไม่มีข้อมูลเดิม'}\nเป็น: ${attendanceStatusLabel(status)}${reason ? `\nเหตุผล: ${sanitize(reason)}` : ''}`));
     }
     if (i.isModalSubmit() && i.customId.startsWith('attendance:reason:')) {
       const status = i.customId.substring('attendance:reason:'.length);
