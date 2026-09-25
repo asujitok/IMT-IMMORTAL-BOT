@@ -1,0 +1,184 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const { randomUUID } = require('node:crypto');
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, '..', 'data', 'db.json');
+
+function load() {
+  if (!fs.existsSync(DATA_FILE)) return { guilds: {} };
+  const obj = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  if (!obj || typeof obj !== 'object' || !obj.guilds) throw new Error('รูปแบบไฟล์ข้อมูลไม่ถูกต้อง');
+  return obj;
+}
+function save(db) {
+  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+  const temp = DATA_FILE + '.' + process.pid + '.' + randomUUID() + '.tmp';
+  fs.writeFileSync(temp, JSON.stringify(db, null, 2), { mode: 0o600 });
+  fs.renameSync(temp, DATA_FILE);
+}
+function guild(db, guildId) {
+  db.guilds[guildId] ||= { config: null, items: [], attendance: {}, inventory: {}, sent: {} };
+  return db.guilds[guildId];
+}
+function today(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(now);
+}
+function timeBangkok(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(now);
+  return parts.find(x => x.type === 'hour').value + ':' + parts.find(x => x.type === 'minute').value;
+}
+function getGuild(id) { return load().guilds[id] || null; }
+function getGuildIds() { return Object.keys(load().guilds); }
+function update(id, fn) {
+  const db = load();
+  const g = guild(db, id);
+  const result = fn(g);
+  save(db);
+  return result;
+}
+function setConfig(id, config) { update(id, g => { g.config = { ...(g.config || {}), ...config }; }); }
+function addItem(id, name, requiredQty) {
+  return update(id, g => {
+    if (g.items.some(i => i.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      throw new Error('มีชื่อรายการนี้อยู่แล้ว');
+    }
+    const item = { id: randomUUID(), name, requiredQty };
+    g.items.push(item);
+    return item;
+  });
+}
+function removeItem(id, itemId) {
+  return update(id, g => {
+    const idx = g.items.findIndex(i => i.id === itemId);
+    if (idx < 0) throw new Error('ไม่พบรายการของ');
+    return g.items.splice(idx, 1)[0];
+  });
+}
+function attendance(id, date, userId, status, reason = '', expectedSnapshot) {
+  if (!['present', 'late', 'leave'].includes(status)) throw new Error('สถานะเช็กชื่อไม่ถูกต้อง');
+  if (typeof reason !== 'string') throw new Error('เหตุผลไม่ถูกต้อง');
+  reason = reason.trim();
+  if (status === 'present' && reason) throw new Error('สถานะมาไม่ต้องระบุเหตุผล');
+  if (status !== 'present' && (reason.length < 3 || reason.length > 250)) {
+    throw new Error('มาสายและลาต้องระบุเหตุผล 3–250 ตัวอักษร');
+  }
+  return update(id, g => {
+    g.attendance[date] ||= {};
+    const previous = g.attendance[date][userId] || null;
+    if (expectedSnapshot !== undefined && JSON.stringify(previous) !== expectedSnapshot) {
+      throw new Error('ข้อมูลเช็กชื่อมีการเปลี่ยนแปลงแล้ว กรุณาเริ่มทำรายการใหม่');
+    }
+    if (previous?.status === status && (previous.reason || '') === reason) {
+      return { previous, unchanged: true, record: previous };
+    }
+    const record = { status, reason, at: new Date().toISOString(), revision: randomUUID() };
+    g.attendance[date][userId] = record;
+    return { previous, unchanged: false, record };
+  });
+}
+// ยืนยันลาเป็นช่วงวันในธุรกรรมเดียว ป้องกันการบันทึกค้างเพียงครึ่งช่วง
+function attendanceRange(id, dates, userId, reason, expectedSnapshots) {
+  if (!Array.isArray(dates) || !dates.length || dates.length > 31 || new Set(dates).size !== dates.length) {
+    throw new Error('ช่วงวันลาไม่ถูกต้อง');
+  }
+  if (typeof reason !== 'string' || reason.trim().length < 3 || reason.trim().length > 250) {
+    throw new Error('การลาต้องมีเหตุผล 3–250 ตัวอักษร');
+  }
+  if (!expectedSnapshots || typeof expectedSnapshots !== 'object') throw new Error('ข้อมูลยืนยันไม่ครบ');
+  return update(id, g => {
+    const changes = [];
+    // ตรวจสอบทุกวันก่อนแก้ไขแม้แต่วันเดียว
+    for (const date of dates) {
+      const previous = g.attendance?.[date]?.[userId] || null;
+      if (!Object.hasOwn(expectedSnapshots, date) || JSON.stringify(previous) !== expectedSnapshots[date]) {
+        throw new Error('ข้อมูลเช็กชื่อระหว่างช่วงวันลามีการเปลี่ยนแปลง กรุณาเริ่มใหม่');
+      }
+      changes.push({ date, previous, unchanged: previous?.status === 'leave' && previous.reason === reason.trim() });
+    }
+    const at = new Date().toISOString();
+    for (const entry of changes) {
+      if (entry.unchanged) continue;
+      g.attendance[entry.date] ||= {};
+      g.attendance[entry.date][userId] = {
+        status: 'leave', reason: reason.trim(), at, revision: randomUUID(),
+        leaveRange: { from: dates[0], to: dates[dates.length - 1] }
+      };
+    }
+    return { changes, unchanged: changes.every(x => x.unchanged) };
+  });
+}
+// ถ้าอ่านสมาชิกไม่ได้ ห้ามสร้างวันขาดย้อนหลังจากรายชื่อปัจจุบัน
+function saveRosterAtClose(id, date, userIds) {
+  if (!Array.isArray(userIds)) throw new Error('ต้องมีรายชื่อสมาชิกจริงที่อ่านได้');
+  return update(id, g => {
+    g.rostersAtClose ||= {};
+    if (g.rostersAtClose[date]) return false;
+    g.rostersAtClose[date] = [...new Set(userIds)];
+    return true;
+  });
+}
+function saveHistoryView(id, view) {
+  return update(id, g => { g.historyViews ||= {}; g.historyViews[view.messageId] = view; });
+}
+function removeHistoryView(id, messageId) {
+  return update(id, g => {
+    if (!g.historyViews?.[messageId]) return false;
+    delete g.historyViews[messageId]; return true;
+  });
+}
+function inventory(id, date, userId, itemId, foundQty, condition, note = '') {
+  return update(id, g => {
+    const item = g.items.find(i => i.id === itemId);
+    if (!item) throw new Error('รายการนี้ถูกลบหรือไม่มีอยู่แล้ว');
+    g.inventory[date] ||= {};
+    g.inventory[date][userId] ||= {};
+    const previous = g.inventory[date][userId][itemId] || null;
+    g.inventory[date][userId][itemId] = {
+      name: item.name, requiredQty: item.requiredQty, foundQty, condition, note,
+      at: new Date().toISOString()
+    };
+    return { item, previous };
+  });
+}
+
+// ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
+function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
+  name = String(name || '').trim(); unit = String(unit || '').trim();
+  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  return update(id, g => {
+    g.locker ||= [];
+    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
+    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
+  });
+}
+function lockerEdit(id, name, quantity, unit = null) {
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  return update(id, g => {
+    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    entry.quantity = quantity;
+    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
+    return entry;
+  });
+}
+function lockerRemove(id, name) {
+  return update(id, g => {
+    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    return g.locker.splice(idx, 1)[0];
+  });
+}
+
+function markSent(id, date, kind) {
+  update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
+}
+module.exports = {
+  DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
+  attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove,
+  saveRosterAtClose, saveHistoryView, removeHistoryView
+};

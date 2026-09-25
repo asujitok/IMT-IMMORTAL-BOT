@@ -1,0 +1,20 @@
+{
+  "name": "team-daily-discord-bot",
+  "version": "1.4.0",
+  "private": true,
+  "description": "[IMT] IMMORTAL เช็กชื่อ 18:00-23:59 ลาหลายวัน ประวัติ 5 นาที ส่งของและตู้แก๊ง",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "scripts": {
+    "register": "node register.js",
+    "start": "node src/index.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "discord.js": "14.27.0",
+    "dotenv": "^16.6.1",
+    "node-cron": "^4.2.1"
+  }
+}
