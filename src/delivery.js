@@ -93,17 +93,27 @@ function findById(guildId, id) {
   }
   return null;
 }
-function review(guildId, date, id, result, reviewerId) {
-  if (!['approved','rejected'].includes(result)) throw new Error('ผลตรวจไม่ถูกต้อง');
+function setStatus(guildId, date, id, result, reviewerId) {
+  if (!['pending','approved','rejected'].includes(result)) throw new Error('สถานะส่งของไม่ถูกต้อง');
   return store.update(guildId, g => {
     const entry = g.deliveries?.[date]?.find(x => x.id === id);
     if (!entry) throw new Error('ไม่พบรายการส่งของ');
     if (entry.supersededBy) throw new Error('รายการนี้ถูกแทนที่แล้ว ให้ตรวจรายการล่าสุด');
     if (entry.status === result) return { entry, unchanged: true };
-    entry.status = result; entry.reviewedBy = reviewerId; entry.reviewedAt = new Date().toISOString();
-    if (result === 'rejected') { entry.lockerAction = null; entry.lockerActionBy = null; entry.lockerActionAt = null; }
-    return { entry, unchanged: false };
+    const previousStatus = entry.status;
+    entry.status = result;
+    entry.reviewedBy = result === 'pending' ? null : reviewerId;
+    entry.reviewedAt = result === 'pending' ? null : new Date().toISOString();
+    // ถ้าเปลี่ยนออกจาก "รับแล้ว" หรือแก้เป็นรับแล้วใหม่ ให้ล้าง action หลังรับของ เพื่อให้ผู้ดูแลเลือกใหม่และกันข้อมูลเก่าค้าง
+    if (result !== 'approved' || previousStatus !== 'approved') {
+      entry.lockerAction = null; entry.lockerActionBy = null; entry.lockerActionAt = null;
+    }
+    return { entry, unchanged: false, previousStatus };
   });
+}
+function review(guildId, date, id, result, reviewerId) {
+  if (!['approved','rejected'].includes(result)) throw new Error('ผลตรวจไม่ถูกต้อง');
+  return setStatus(guildId, date, id, result, reviewerId);
 }
 function markLockerAction(guildId, date, id, action, userId) {
   if (!['imported','skipped'].includes(action)) throw new Error('การดำเนินการหลังรับของไม่ถูกต้อง');
@@ -144,4 +154,4 @@ function summary(g, date, roster = null, cutoff = '20:00', currentTime = store.t
   return lines.join('\n\n');
 }
 module.exports = { MAX_QUANTITY, STATUS, validName, validUnit, validQuantity, prepare, take, cancel, submit,
-  attachMessage, removeUnposted, findByMessage, findById, review, markLockerAction, list, summary };
+  attachMessage, removeUnposted, findByMessage, findById, review, markLockerAction, setStatus, list, summary };
