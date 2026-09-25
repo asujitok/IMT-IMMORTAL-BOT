@@ -456,7 +456,7 @@ function houseMark(id, date, houseId, targetId, status, actorId, reason = '') {
   reason = String(reason || '').trim().slice(0, 250);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('วันที่ไม่ถูกต้อง');
   if (!/^\d{5,25}$/.test(targetId)) throw new Error('สมาชิกไม่ถูกต้อง');
-  if (!['present', 'late', 'leave'].includes(status)) throw new Error('สถานะเช็กชื่อบ้านไม่ถูกต้อง');
+  if (!['present', 'late', 'leave', 'absent'].includes(status)) throw new Error('สถานะเช็กชื่อบ้านไม่ถูกต้อง');
   return update(id, g => {
     const house = houseFind(g, houseId);
     if (!(house.memberIds || []).includes(targetId)) throw new Error('สมาชิกคนนี้ไม่ได้อยู่ในบ้านนี้');
@@ -471,26 +471,6 @@ function houseMark(id, date, houseId, targetId, status, actorId, reason = '') {
     g.houseAttendanceHistory.push(log);
     if (g.houseAttendanceHistory.length > 1000) g.houseAttendanceHistory.splice(0, g.houseAttendanceHistory.length - 1000);
     return { house, previous, record, log };
-  });
-}
-function houseResetDay(id, date, houseId, actorId = null) {
-  date = String(date || today()).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('วันที่ไม่ถูกต้อง');
-  houseId = String(houseId || '').trim();
-  actorId = actorId ? String(actorId).trim() : null;
-  return update(id, g => {
-    ensureHouseFields(g);
-    const house = houseFind(g, houseId);
-    g.houseAttendance[date] ||= {};
-    const existing = g.houseAttendance[date][house.id] || {};
-    const count = Object.keys(existing).length;
-    g.houseAttendance[date][house.id] = {};
-    const seq = (g.houseAttendanceHistory.at(-1)?.seq || 0) + 1;
-    const log = { id: 'HE-' + String(seq).padStart(6, '0'), seq, date, houseId: house.id, houseName: house.name,
-      userId: null, actorId, from: 'reset', to: 'reset', previousReason: '', reason: `Reset เช็กชื่อบ้านวันนี้ (${count} รายการ)`, at: new Date().toISOString(), count };
-    g.houseAttendanceHistory.push(log);
-    if (g.houseAttendanceHistory.length > 1000) g.houseAttendanceHistory.splice(0, g.houseAttendanceHistory.length - 1000);
-    return { house, date, count, log };
   });
 }
 function houseAttendanceHistory(id, { houseId = null, userId = null, limit = 10 } = {}) {
@@ -509,6 +489,6 @@ module.exports = {
   attendance, attendanceRange, attendanceAdminEdit, attendanceEditHistory, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease, lockerSummary,
   deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
   deliveryLogAdd, deliveryHistory,
-  houseAdd, houseRemove, houseList, houseLeaderSet, houseMemberAdd, houseMemberRemove, housesForLeader, houseMark, houseResetDay, houseAttendanceHistory,
+  houseAdd, houseRemove, houseList, houseLeaderSet, houseMemberAdd, houseMemberRemove, housesForLeader, houseMark, houseAttendanceHistory,
   saveRosterAtClose, saveHistoryView, removeHistoryView
 };
