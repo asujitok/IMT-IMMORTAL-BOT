@@ -39,7 +39,7 @@ function take(id, guildId, userId, now = Date.now()) {
 }
 function cancel(id, guildId, userId) { take(id, guildId, userId); }
 
-// สร้างบันทึกแยกตามรายวัน; คำสั่งรีวิวจะปรับตู้แก๊งในธุรกรรมเดียวกัน
+// ส่งของบันทึกแยกตามรายวัน และไม่แก้ไขจำนวนในตู้แก๊งโดยเด็ดขาด
 function submit(guildId, p) {
   return store.update(guildId, g => {
     g.deliveries ||= {};
@@ -87,21 +87,8 @@ function review(guildId, date, id, result, reviewerId) {
     if (!entry) throw new Error('ไม่พบรายการส่งของ');
     if (entry.supersededBy) throw new Error('รายการนี้ถูกแทนที่แล้ว ให้ตรวจรายการล่าสุด');
     if (entry.status === result) return { entry, unchanged: true };
-    g.locker ||= [];
-    const item = g.locker.find(x => x.name.toLocaleLowerCase() === entry.name.toLocaleLowerCase());
-    if (entry.status === 'approved') {
-      if (!item || item.quantity < entry.quantity) throw new Error('ยอดตู้แก๊งไม่พอสำหรับย้อนกลับ กรุณาปรับยอดด้วย /locker edit ก่อน');
-      item.quantity -= entry.quantity;
-    }
-    if (result === 'approved') {
-      if (item) {
-        const newQty = item.quantity + entry.quantity;
-        if (!Number.isSafeInteger(newQty)) throw new Error('ยอดรวมเกินจำนวนที่ระบบรองรับ');
-        item.quantity = newQty;
-      } else {
-        g.locker.push({ id: randomUUID(), name: entry.name, quantity: entry.quantity, unit: entry.name === 'เงิน' ? 'หน่วย' : 'ชิ้น' });
-      }
-    }
+    // ✅/❌ เปลี่ยนเฉพาะสถานะการส่งของ ไม่สร้าง/เพิ่ม/หัก/ลบของในตู้แก๊ง
+    // ผู้ดูแลต้องจัดการตู้แก๊งเองผ่าน /locker add, /locker edit, /locker remove
     entry.status = result; entry.reviewedBy = reviewerId; entry.reviewedAt = new Date().toISOString();
     return { entry, unchanged: false };
   });
