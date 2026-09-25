@@ -326,10 +326,16 @@ function deliveryReviewComponents(entry) {
       new ButtonBuilder().setCustomId(`delivery:reject:${entry.id}`).setLabel('❌ ไม่รับของ').setStyle(ButtonStyle.Danger)
     )];
   }
+  if (entry.status === 'rejected') {
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`delivery:approve:${entry.id}`).setLabel('✅ แก้เป็นรับแล้ว').setStyle(ButtonStyle.Success)
+    )];
+  }
   if (entry.status === 'approved' && !entry.lockerAction) {
     return [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`delivery:locker-import:${entry.id}`).setLabel('📥 นำเข้าตู้').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`delivery:locker-skip:${entry.id}`).setLabel('ไม่ดำเนินการใดๆ').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`delivery:locker-skip:${entry.id}`).setLabel('ไม่ดำเนินการใดๆ').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`delivery:reject:${entry.id}`).setLabel('❌ แก้เป็นไม่รับ').setStyle(ButtonStyle.Danger)
     )];
   }
   return [];
@@ -343,7 +349,8 @@ function deliveryRequiredText(g) {
 function deliveryRequiredComponents(g) {
   // Discord แสดงปุ่มได้สูงสุด 5 แถว/ข้อความ และ 5 ปุ่ม/แถว
   // จัดแบบ 1 รายการ = ปุ่มส่ง + ปุ่มยกเลิกของผู้ดูแล เพื่อให้ปุ่มอยู่ข้างกัน
-  const rows = (g.deliveryItems || []).slice(0, 5);
+  // เว้นแถวสุดท้ายให้ปุ่ม Reset สำหรับผู้มียศ
+  const rows = (g.deliveryItems || []).slice(0, 4);
   const components = [];
   for (const item of rows) {
     const qty = Number(item.requiredQty || 0).toLocaleString('en-US');
@@ -360,6 +367,10 @@ function deliveryRequiredComponents(g) {
         .setStyle(ButtonStyle.Danger)
     ));
   }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('delivery:reset-rows').setLabel('🔄 Reset รายชื่อ').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delivery:reset-items').setLabel('🧹 Reset ของ').setStyle(ButtonStyle.Danger)
+  ));
   return components;
 }
 function deliveryLogMeta(type) {
@@ -372,7 +383,9 @@ function deliveryLogMeta(type) {
     item_upsert: ['🛠 DELIVERY LOG — สร้าง/แก้ไขของที่ต้องส่ง', 0x5865F2],
     item_remove: ['🗑 DELIVERY LOG — ลบของที่ต้องส่ง', 0xE67E22],
     role_add: ['👑 DELIVERY LOG — เพิ่มยศผู้จัดการส่งของ', 0x9B59B6],
-    role_remove: ['👑 DELIVERY LOG — ลบยศผู้จัดการส่งของ', 0xF39C12]
+    role_remove: ['👑 DELIVERY LOG — ลบยศผู้จัดการส่งของ', 0xF39C12],
+    reset_rows: ['🔄 DELIVERY LOG — Reset รายชื่อส่งของ', 0x95A5A6],
+    reset_items: ['🧹 DELIVERY LOG — Reset ของที่ต้องส่ง', 0xE67E22]
   }[type] || ['📜 DELIVERY LOG', 0xADB5BD];
 }
 function deliveryLogActionText(type) {
@@ -380,7 +393,8 @@ function deliveryLogActionText(type) {
     submitted: 'ส่งของใหม่', approved: 'รับของแล้ว', rejected: 'ไม่รับของ',
     locker_imported: 'นำเข้าตู้', locker_skipped: 'ไม่ดำเนินการใดๆ',
     item_upsert: 'สร้าง/แก้ไขของที่ต้องส่ง', item_remove: 'ลบของที่ต้องส่ง',
-    role_add: 'เพิ่มยศผู้จัดการส่งของ', role_remove: 'ลบยศผู้จัดการส่งของ'
+    role_add: 'เพิ่มยศผู้จัดการส่งของ', role_remove: 'ลบยศผู้จัดการส่งของ',
+    reset_rows: 'Reset รายชื่อส่งของ', reset_items: 'Reset ของที่ต้องส่ง'
   }[type] || type;
 }
 function deliveryLogLine(x, idx = null) {
@@ -540,7 +554,8 @@ async function reviewDeliveryFromButton(i, id, outcome) {
   const result = delivery.review(i.guildId, match.date, match.entry.id, outcome, i.user.id);
   if (!result.unchanged) await recordDeliveryLog(i.guildId, outcome === 'approved' ? 'approved' : 'rejected', {
     date: match.date, userId: result.entry.userId, actorId: i.user.id, reviewerId: i.user.id, deliveryId: result.entry.id,
-    itemName: result.entry.name, quantity: result.entry.quantity, unit: result.entry.unit, status: result.entry.status
+    itemName: result.entry.name, quantity: result.entry.quantity, unit: result.entry.unit, status: result.entry.status,
+    note: result.previousStatus ? `แก้สถานะจาก ${result.previousStatus} เป็น ${result.entry.status}` : null
   });
   await i.message.edit({ content: receiptText(result.entry), components: deliveryReviewComponents(result.entry), allowedMentions: silent });
   await refreshDeliveryDashboard(i.guild, match.date);
@@ -729,6 +744,22 @@ client.on(Events.InteractionCreate, async i => {
         });
         await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังยกเลิกของที่ต้องส่ง:', e.message));
         return await i.reply(ep(`ยกเลิกรายการของที่ต้องส่งแล้ว: ${sanitize(removed.name)} ${Number(removed.requiredQty || 0).toLocaleString('en-US')} ${sanitize(removed.unit || 'ชิ้น')}`));
+      }
+      if (i.customId === 'delivery:reset-rows') {
+        const g = configOf(i);
+        requireDeliveryManager(i, g);
+        const result = store.deliveryResetRows(i.guildId, store.today());
+        await recordDeliveryLog(i.guildId, 'reset_rows', { actorId: i.user.id, quantity: result.count, note: `ล้างรายชื่อ/สถานะส่งของของวันที่ ${result.date}` });
+        await refreshDeliveryDashboard(i.guild, result.date).catch(e => console.error('รีเฟรชรายงานส่งของหลัง reset รายชื่อ:', e.message));
+        return await i.reply(ep(`Reset รายชื่อส่งของของวันนี้แล้ว (${result.count} รายการ)`));
+      }
+      if (i.customId === 'delivery:reset-items') {
+        const g = configOf(i);
+        requireDeliveryManager(i, g);
+        const result = store.deliveryResetItems(i.guildId);
+        await recordDeliveryLog(i.guildId, 'reset_items', { actorId: i.user.id, quantity: result.count, note: `ล้างของที่ต้องส่ง ${result.count} รายการ` });
+        await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลัง reset ของ:', e.message));
+        return await i.reply(ep(`Reset ของที่ต้องส่งแล้ว (${result.count} รายการ)`));
       }
       if (i.customId.startsWith('delivery:approve:')) {
         return await reviewDeliveryFromButton(i, i.customId.substring('delivery:approve:'.length), 'approved');
