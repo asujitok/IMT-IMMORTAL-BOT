@@ -341,20 +341,24 @@ function deliveryRequiredText(g) {
     `${idx + 1}. ${sanitize(x.name)} — ${Number(x.requiredQty || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n').slice(0, 1900);
 }
 function deliveryRequiredComponents(g) {
-  const rows = (g.deliveryItems || []).slice(0, 25);
+  // Discord แสดงปุ่มได้สูงสุด 5 แถว/ข้อความ และ 5 ปุ่ม/แถว
+  // จัดแบบ 1 รายการ = ปุ่มส่ง + ปุ่มยกเลิกของผู้ดูแล เพื่อให้ปุ่มอยู่ข้างกัน
+  const rows = (g.deliveryItems || []).slice(0, 5);
   const components = [];
-  for (let i = 0; i < rows.length; i += 5) {
-    const row = new ActionRowBuilder();
-    for (const item of rows.slice(i, i + 5)) {
-      const qty = Number(item.requiredQty || 0).toLocaleString('en-US');
-      const unit = sanitize(item.unit || 'ชิ้น');
-      const name = sanitize(item.name);
-      row.addComponents(new ButtonBuilder()
+  for (const item of rows) {
+    const qty = Number(item.requiredQty || 0).toLocaleString('en-US');
+    const unit = sanitize(item.unit || 'ชิ้น');
+    const name = sanitize(item.name);
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
         .setCustomId(`delivery:reqsend:${item.id}`)
         .setLabel((`📦 ส่ง ${name} ${qty} ${unit}`).slice(0, 80))
-        .setStyle(ButtonStyle.Success));
-    }
-    components.push(row);
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`delivery:reqcancel:${item.id}`)
+        .setLabel('🗑 ยกเลิก')
+        .setStyle(ButtonStyle.Danger)
+    ));
   }
   return components;
 }
@@ -714,6 +718,18 @@ client.on(Events.InteractionCreate, async i => {
         if (!Number.isSafeInteger(qty) || qty < 1) throw new Error('รายการนี้ตั้งจำนวนไว้เป็น 0 จึงส่งผ่านปุ่มไม่ได้');
         return await beginDelivery(i, item.name, qty, item.unit || 'ชิ้น');
       }
+      if (i.customId.startsWith('delivery:reqcancel:')) {
+        const g = configOf(i);
+        requireDeliveryManager(i, g);
+        const itemId = i.customId.substring('delivery:reqcancel:'.length);
+        const removed = store.deliveryItemRemoveById(i.guildId, itemId);
+        await recordDeliveryLog(i.guildId, 'item_remove', {
+          actorId: i.user.id, itemName: removed.name, quantity: removed.requiredQty, unit: removed.unit,
+          note: 'ยกเลิกจากปุ่มข้างรายการของที่ต้องส่ง'
+        });
+        await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังยกเลิกของที่ต้องส่ง:', e.message));
+        return await i.reply(ep(`ยกเลิกรายการของที่ต้องส่งแล้ว: ${sanitize(removed.name)} ${Number(removed.requiredQty || 0).toLocaleString('en-US')} ${sanitize(removed.unit || 'ชิ้น')}`));
+      }
       if (i.customId.startsWith('delivery:approve:')) {
         return await reviewDeliveryFromButton(i, i.customId.substring('delivery:approve:'.length), 'approved');
       }
@@ -889,14 +905,12 @@ client.on(Events.InteractionCreate, async i => {
         const channel = await i.guild.channels.fetch(g.config.deliveryChannelId);
         if (!channel?.isTextBased()) throw new Error('บอตไม่สามารถเข้าห้องส่งของได้');
         const embed = new EmbedBuilder().setTitle('📦 [IMT] IMMORTAL • ห้องส่งของ')
-          .setDescription('สมาชิกกด **ส่งของ** แล้วกรอกชื่อของและจำนวน หรือกดปุ่มรายการที่ต้องส่งเพื่อส่งทันทีโดยไม่ต้องกรอกเอง\nทุกคนตรวจสอบรายการของที่ต้องส่งและประวัติส่งของล่าสุดได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งได้\nเมื่อมีสมาชิกส่งของแล้ว จะมีปุ่ม **✅ ยืนยันรับของ** และ **❌ ไม่รับของ** ใต้รายการนั้นโดยตรง\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
+          .setDescription('สมาชิกกดปุ่มรายการที่ต้องส่งเพื่อส่งทันทีโดยไม่ต้องกรอกเอง\nทุกคนตรวจสอบรายการของที่ต้องส่งได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งได้\nเมื่อมีสมาชิกส่งของแล้ว จะมีปุ่ม **✅ ยืนยันรับของ** และ **❌ ไม่รับของ** ใต้รายการนั้นโดยตรง\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
           .setColor(0xADB5BD);
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('delivery:items-manage').setLabel('🛠 สร้าง/แก้ไขของที่ต้องส่ง').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('delivery:history').setLabel('📜 ประวัติส่งของ').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('delivery:open').setLabel('📦 ส่งของ').setStyle(ButtonStyle.Success)
+          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary)
         );
         await channel.send({ embeds: [embed], components: [row], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
         await refreshDeliveryDashboard(i.guild);
