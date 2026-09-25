@@ -21,6 +21,13 @@ const deliveryLogWebhookUrl = process.env.DELIVERY_LOG_WEBHOOK_URL || '';
 const vaultLogWebhookUrl = process.env.VAULT_LOG_WEBHOOK_URL || process.env.VAULT_LOG || process.env.Vault_log || '';
 const timeLogWebhookUrl = process.env.TIME_LOG_WEBHOOK_URL || process.env.TIME_LOG || process.env.Time_log || '';
 const homeLogWebhookUrl = process.env.HOME_LOG_WEBHOOK_URL || process.env.HOME_LOG || process.env.home_log || process.env.Home_log || process.env.homeLog || '';
+const reminderLogWebhookUrl = process.env.REMINDER_LOG_WEBHOOK_URL || process.env.REMINDER_LOG || process.env.reminder_log || '';
+const homeReminderWebhookUrl = process.env.HOME_REMINDER_LOG_WEBHOOK_URL || process.env.HOME_REMINDER_LOG || process.env.home_reminder_log || reminderLogWebhookUrl || '';
+const disciplineLogWebhookUrl = process.env.DISCIPLINE_LOG_WEBHOOK_URL || process.env.DISCIPLINE_LOG || process.env.discipline_log || '';
+const weeklyLogWebhookUrl = process.env.WEEKLY_LOG_WEBHOOK_URL || process.env.WEEKLY_LOG || process.env.weekly_log || '';
+const adminLogWebhookUrl = process.env.ADMIN_LOG_WEBHOOK_URL || process.env.ADMIN_LOG || process.env.admin_log || '';
+const backupLogWebhookUrl = process.env.BACKUP_LOG_WEBHOOK_URL || process.env.BACKUP_LOG || process.env.backup_log || '';
+const profileLogWebhookUrl = process.env.PROFILE_LOG_WEBHOOK_URL || process.env.PROFILE_LOG || process.env.profile_log || '';
 if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
@@ -1122,6 +1129,175 @@ async function dailyWebhookSummaries() {
     }
   }
 }
+
+function simpleWebhookPayload(username, title, description, color = 0x5865F2, fields = []) {
+  return {
+    username,
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: String(title || 'IMT Log').slice(0, 256),
+      description: String(description || '-').slice(0, 3900),
+      color,
+      fields: fields.filter(Boolean).slice(0, 25),
+      footer: { text: '[IMT] IMMORTAL • เวลาไทย' },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+async function postGenericWebhook(url, payload, label) {
+  if (!url) return false;
+  const response = await fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`${label} webhook ล้มเหลว: ${response.status}`);
+  return true;
+}
+function dayStatusGroups(g, date, roster = null) {
+  const records = g?.attendance?.[date] || {};
+  const present = [], late = [], leave = [], missing = [];
+  const rosterRows = Array.isArray(roster) ? roster : [];
+  const ids = rosterRows.length ? rosterRows.map(m => m.id) : Object.keys(records);
+  for (const id of ids) {
+    const rec = records[id] || null;
+    const row = { id, record: rec };
+    if (rec?.status === 'present') present.push(row);
+    else if (rec?.status === 'late') late.push(row);
+    else if (rec?.status === 'leave') leave.push(row);
+    else missing.push(row);
+  }
+  return { present, late, leave, missing, total: ids.length };
+}
+function statusList(rows, empty = 'ไม่มี') {
+  if (!rows.length) return empty;
+  return rows.slice(0, 25).map((x, idx) => {
+    const t = x.record?.at ? String(x.record.at).slice(11, 16) : '';
+    const r = x.record?.reason ? ` — ${sanitize(x.record.reason)}` : '';
+    return `${idx + 1}. <@${x.id}>${t ? ` เวลา ${t}` : ''}${r}`;
+  }).join('\n') + (rows.length > 25 ? `\n…และอีก ${rows.length - 25} คน` : '');
+}
+function reminderPayload(g, date, roster, minuteLabel = '') {
+  const groups = dayStatusGroups(g, date, roster);
+  return simpleWebhookPayload('IMT Reminder Log', `🔔 เตือนเช็กชื่อ • ${date}`, `ยังไม่เช็กชื่อ **${groups.missing.length} คน** จากสมาชิก **${groups.total} คน**${minuteLabel ? `\nรอบแจ้งเตือน: **${minuteLabel}**` : ''}\n\n${statusList(groups.missing)}`, 0xFEE75C);
+}
+function houseReminderPayload(g, date) {
+  const houses = g?.houses || [];
+  const day = g?.houseAttendance?.[date] || {};
+  const lines = [];
+  for (const h of houses) {
+    const records = day[h.id] || {};
+    const members = h.memberIds || [];
+    const missing = members.filter(id => !records[id]);
+    if (missing.length) lines.push(`🏠 **${sanitize(h.name)}** ${h.leaderId ? `หัวหน้า <@${h.leaderId}>` : 'ยังไม่ตั้งหัวหน้า'}\nยังไม่เช็ก ${missing.length}/${members.length} คน\n${missing.slice(0, 15).map((id, idx) => `${idx + 1}. <@${id}>`).join('\n')}${missing.length > 15 ? `\n…และอีก ${missing.length - 15} คน` : ''}`);
+  }
+  return simpleWebhookPayload('IMT Home Reminder Log', `🏠 เตือนหัวหน้าบ้าน • ${date}`, lines.length ? lines.join('\n\n').slice(0, 3900) : 'ทุกบ้านเช็กชื่อครบแล้ว', 0x57F287);
+}
+function attendanceScoreFor(g, userId, endDate = store.today()) {
+  let present = 0, late = 0, leave = 0, missing = 0, deliveryApproved = 0, deliveryRejected = 0, deliveryPending = 0;
+  const scoreMap = { present: 1, late: -1, leave: 0, missing: -3, deliveryApproved: 1, deliveryRejected: -2, deliveryPending: 0 };
+  for (const [date, records] of Object.entries(g?.attendance || {})) {
+    if (date > endDate) continue;
+    const rec = records?.[userId];
+    if (rec?.status === 'present') present++;
+    else if (rec?.status === 'late') late++;
+    else if (rec?.status === 'leave') leave++;
+  }
+  for (const [date, roster] of Object.entries(g?.rostersAtClose || {})) {
+    if (date > endDate) continue;
+    if (Array.isArray(roster) && roster.includes(userId) && !g?.attendance?.[date]?.[userId]) missing++;
+  }
+  for (const rows of Object.values(g?.delivery || {})) {
+    if (!Array.isArray(rows)) continue;
+    for (const r of rows) if (r.userId === userId) {
+      if (r.status === 'approved') deliveryApproved++;
+      else if (r.status === 'rejected') deliveryRejected++;
+      else if (r.status === 'pending') deliveryPending++;
+    }
+  }
+  const score = present*scoreMap.present + late*scoreMap.late + missing*scoreMap.missing + deliveryApproved*scoreMap.deliveryApproved + deliveryRejected*scoreMap.deliveryRejected;
+  return { score, present, late, leave, missing, deliveryApproved, deliveryRejected, deliveryPending };
+}
+function allKnownMemberIds(g, roster = null) {
+  const ids = new Set();
+  if (Array.isArray(roster)) for (const m of roster) ids.add(m.id);
+  for (const records of Object.values(g?.attendance || {})) for (const id of Object.keys(records || {})) ids.add(id);
+  for (const arr of Object.values(g?.rostersAtClose || {})) if (Array.isArray(arr)) for (const id of arr) ids.add(id);
+  for (const h of g?.houses || []) for (const id of h.memberIds || []) ids.add(id);
+  return [...ids];
+}
+function disciplineReportText(g, roster = null, date = store.today(), limit = 20) {
+  const rows = allKnownMemberIds(g, roster).map(id => ({ id, ...attendanceScoreFor(g, id, date) }))
+    .sort((a,b) => b.score - a.score || a.id.localeCompare(b.id));
+  if (!rows.length) return 'ยังไม่มีข้อมูลคะแนนวินัย';
+  const top = rows.slice(0, limit).map((x, idx) => `${idx + 1}. <@${x.id}> — คะแนน **${x.score}** | มา ${x.present} | สาย ${x.late} | ลา ${x.leave} | ขาด ${x.missing} | ส่งผ่าน ${x.deliveryApproved} | ไม่รับ ${x.deliveryRejected}`).join('\n');
+  const bad = rows.filter(x => x.score < 0).slice(0, 10).map((x, idx) => `${idx + 1}. <@${x.id}> — ${x.score}`).join('\n') || 'ไม่มี';
+  return `🏆 **อันดับคะแนนวินัย**\n${top}\n\n⚠️ **คะแนนติดลบ**\n${bad}`.slice(0, 3900);
+}
+function profileText(g, userId, roster = null) {
+  const date = store.today();
+  const att = g?.attendance?.[date]?.[userId] || null;
+  const house = (g?.houses || []).find(h => (h.memberIds || []).includes(userId));
+  const hrec = house ? g?.houseAttendance?.[date]?.[house.id]?.[userId] : null;
+  const sc = attendanceScoreFor(g, userId, date);
+  const deliveryRows = Object.values(g?.delivery || {}).flat().filter(x => x.userId === userId).slice(-5).reverse();
+  return `👤 **โปรไฟล์สมาชิก**\nสมาชิก: <@${userId}>\nบ้าน: ${house ? `🏠 ${sanitize(house.name)}` : 'ยังไม่อยู่บ้าน'}\nเช็กชื่อวันนี้: ${att ? attendanceNames[att.status] : '⬜ ยังไม่เช็ก'}${att?.reason ? ` — ${sanitize(att.reason)}` : ''}\nเช็กชื่อบ้านวันนี้: ${hrec ? houseStatusLabel(hrec.status) : '⬜ ยังไม่เช็ก'}\nคะแนนวินัย: **${sc.score}**\nมา ${sc.present} | มาสาย ${sc.late} | ลา ${sc.leave} | ขาด ${sc.missing}\nส่งผ่าน ${sc.deliveryApproved} | ไม่รับ ${sc.deliveryRejected} | รอตรวจ ${sc.deliveryPending}\n\n📦 **ส่งของล่าสุด**\n${deliveryRows.length ? deliveryRows.map((x, idx) => `${idx + 1}. ${itemLabel(x.name)} ${x.quantity} ${sanitize(x.unit || 'ชิ้น')} — ${x.status}`).join('\n') : 'ยังไม่มีข้อมูลส่งของ'}`.slice(0, 1900);
+}
+function weeklyReportPayload(guildId, g, roster = null, date = store.today()) {
+  const discipline = disciplineReportText(g, roster, date, 15);
+  return simpleWebhookPayload('IMT Weekly Log', `📊 สรุปรายสัปดาห์ • ${date}`, `${discipline}\n\n🏠 **สรุปบ้านวันนี้**\n${houseSummaryText(g, date).slice(0, 1200)}`, 0x9B59B6);
+}
+function backupPayload(guildId, g) {
+  const safe = JSON.stringify({ guildId, generatedAt: new Date().toISOString(), date: store.today(), data: g }, null, 2);
+  return simpleWebhookPayload('IMT Backup Log', `💾 Backup ข้อมูล • ${store.today()}`, `ข้อมูลสำรอง JSON อยู่ใน code block ด้านล่าง\n\n\`\`\`json\n${safe.slice(0, 3300)}\n\`\`\``, 0x95A5A6);
+}
+function adminDashboardComponents() {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('admin:profile').setLabel('👤 โปรไฟล์ฉัน').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('admin:discipline').setLabel('🏆 คะแนนวินัย').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('admin:weekly').setLabel('📊 สรุปรายสัปดาห์').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('admin:backup').setLabel('💾 Backup').setStyle(ButtonStyle.Secondary)
+  )];
+}
+function adminDashboardText() {
+  return `🧭 **Admin Dashboard**\nรวมระบบใหม่ v2.2\n\n- 🔔 เตือนคนยังไม่เช็กชื่อ\n- 🏠 เตือนหัวหน้าบ้าน\n- 🏆 คะแนนวินัย\n- 👤 โปรไฟล์สมาชิก\n- 📊 สรุปรายสัปดาห์\n- 💾 Backup ข้อมูล\n\nปุ่มนี้ใช้สำหรับดูข้อมูลหลักแบบเร็ว`; 
+}
+async function reminderSchedules() {
+  const t = store.timeBangkok();
+  if (!['19:30', '19:50'].includes(t)) return;
+  const date = store.today();
+  for (const id of store.getGuildIds()) {
+    const g = store.getGuild(id); if (!g?.config) continue;
+    if (g.sent?.[date]?.[`reminder_${t}`]) continue;
+    const guild = client.guilds.cache.get(id); if (!guild) continue;
+    let roster = null; try { roster = await optionalRoster(guild, g.config); } catch {}
+    if (Array.isArray(roster) && reminderLogWebhookUrl) await postGenericWebhook(reminderLogWebhookUrl, reminderPayload(g, date, roster, t), 'reminder').catch(e => console.error('ส่ง reminder ไม่สำเร็จ:', e.message));
+    if (homeReminderWebhookUrl && (g.houses || []).length) await postGenericWebhook(homeReminderWebhookUrl, houseReminderPayload(g, date), 'home reminder').catch(e => console.error('ส่ง home reminder ไม่สำเร็จ:', e.message));
+    store.markSent(id, date, `reminder_${t}`);
+  }
+}
+async function weeklyAndBackupSchedules() {
+  const date = store.today(), t = store.timeBangkok();
+  const day = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Bangkok', weekday: 'short' }).format(new Date());
+  for (const id of store.getGuildIds()) {
+    const g = store.getGuild(id); if (!g) continue;
+    const guild = client.guilds.cache.get(id);
+    let roster = null;
+    if (guild && g.config) { try { roster = await optionalRoster(guild, g.config); } catch {} }
+    if (t === '23:55' && backupLogWebhookUrl && !g.sent?.[date]?.backupWebhook) {
+      await postGenericWebhook(backupLogWebhookUrl, backupPayload(id, g), 'backup').catch(e => console.error('ส่ง backup webhook ไม่สำเร็จ:', e.message));
+      store.markSent(id, date, 'backupWebhook');
+    }
+    if (t === '23:58' && day === 'Sun' && weeklyLogWebhookUrl && !g.sent?.[date]?.weeklyWebhook) {
+      await postGenericWebhook(weeklyLogWebhookUrl, weeklyReportPayload(id, g, roster, date), 'weekly').catch(e => console.error('ส่ง weekly webhook ไม่สำเร็จ:', e.message));
+      store.markSent(id, date, 'weeklyWebhook');
+    }
+    if (t === '23:57' && disciplineLogWebhookUrl && !g.sent?.[date]?.disciplineWebhook) {
+      await postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัยประจำวัน • ${date}`, disciplineReportText(g, roster, date, 20), 0xE67E22), 'discipline').catch(e => console.error('ส่ง discipline webhook ไม่สำเร็จ:', e.message));
+      store.markSent(id, date, 'disciplineWebhook');
+    }
+  }
+}
+
 function deliveryItemModal() {
   return new ModalBuilder().setTitle('สร้าง/แก้ไขของที่ต้องส่ง').setCustomId('delivery:item-modal')
     .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name')
@@ -1848,6 +2024,29 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (!condition) throw new Error('สภาพต้องเป็น ปกติ, ชำรุด หรือ สูญหาย');
       return await checkItem(i, id, Number(rawQty), condition, i.fields.getTextInputValue('note'));
     }
+
+    if (i.isButton() && i.customId.startsWith('admin:')) {
+      const g = configOf(i);
+      await i.deferReply({ flags: MessageFlags.Ephemeral });
+      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
+      if (i.customId === 'admin:profile') return await i.editReply(profileText(g, i.user.id, roster));
+      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+      if (i.customId === 'admin:discipline') {
+        const text = disciplineReportText(g, roster, store.today(), 25);
+        if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
+        return await i.editReply(text);
+      }
+      if (i.customId === 'admin:weekly') {
+        const payload = weeklyReportPayload(i.guildId, g, roster, store.today());
+        if (weeklyLogWebhookUrl) postGenericWebhook(weeklyLogWebhookUrl, payload, 'weekly').catch(console.error);
+        return await i.editReply(payload.embeds[0].description);
+      }
+      if (i.customId === 'admin:backup') {
+        if (backupLogWebhookUrl) postGenericWebhook(backupLogWebhookUrl, backupPayload(i.guildId, g), 'backup').catch(console.error);
+        return await i.editReply('ส่ง Backup ไปยัง webhook แล้ว ถ้าตั้ง BACKUP_LOG_WEBHOOK_URL ไว้');
+      }
+    }
+
     if (!i.isChatInputCommand()) return;
     if (i.commandName === 'setup') {
       if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
@@ -2130,6 +2329,46 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       }
     }
 
+
+    if (i.commandName === 'profile') {
+      const g = configOf(i);
+      if (!onlyTeam(i, g) && !manager(i)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
+      const target = i.options.getUser('member') || i.user;
+      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
+      const text = profileText(g, target.id, roster);
+      if (profileLogWebhookUrl) postGenericWebhook(profileLogWebhookUrl, simpleWebhookPayload('IMT Profile Log', `👤 เปิดดูโปรไฟล์ • ${target.username}`, `ผู้เปิดดู: <@${i.user.id}>\nเป้าหมาย: <@${target.id}>`, 0x5865F2), 'profile').catch(console.error);
+      return await i.reply(ep(text));
+    }
+    if (i.commandName === 'discipline') {
+      const g = configOf(i);
+      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+      await i.deferReply({ flags: MessageFlags.Ephemeral });
+      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
+      const text = disciplineReportText(g, roster, store.today(), 25);
+      if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
+      return await i.editReply(text);
+    }
+    if (i.commandName === 'admin') {
+      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
+      const sub = i.options.getSubcommand();
+      const g = configOf(i);
+      if (sub === 'panel') {
+        if (adminLogWebhookUrl) postGenericWebhook(adminLogWebhookUrl, simpleWebhookPayload('IMT Admin Log', '🧭 เปิด Admin Dashboard', `ผู้สร้าง: <@${i.user.id}>`, 0x34495E), 'admin').catch(console.error);
+        return await i.reply({ content: adminDashboardText(), components: adminDashboardComponents(), flags: MessageFlags.Ephemeral, allowedMentions: silent });
+      }
+      if (sub === 'backup') {
+        if (!backupLogWebhookUrl) return await i.reply(ep('ยังไม่ได้ตั้ง BACKUP_LOG_WEBHOOK_URL'));
+        await postGenericWebhook(backupLogWebhookUrl, backupPayload(i.guildId, g), 'backup');
+        return await i.reply(ep('ส่ง Backup ไปยัง backup_log แล้ว'));
+      }
+      if (sub === 'weekly') {
+        let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
+        const payload = weeklyReportPayload(i.guildId, g, roster, store.today());
+        if (weeklyLogWebhookUrl) await postGenericWebhook(weeklyLogWebhookUrl, payload, 'weekly');
+        return await i.reply(ep(payload.embeds[0].description));
+      }
+    }
+
     if (i.commandName === 'status') {
       const g = configOf(i);
       if (!onlyTeam(i, g)) throw new Error('คุณยังไม่มีบทบาทสมาชิกทีมที่กำหนด');
@@ -2166,10 +2405,14 @@ client.once(Events.ClientReady, c => {
     snapshotRosterNearMidnight().catch(console.error);
     dailyWebhookSummaries().catch(console.error);
     cleanupHistoryViews().catch(console.error);
+    reminderSchedules().catch(console.error);
+    weeklyAndBackupSchedules().catch(console.error);
   }, { timezone: 'Asia/Bangkok' });
   dailySummaries().catch(console.error);
   dailyWebhookSummaries().catch(console.error);
   ensureDailyDashboard().catch(console.error);
   cleanupHistoryViews().catch(console.error);
+  reminderSchedules().catch(console.error);
+  weeklyAndBackupSchedules().catch(console.error);
 });
 client.login(token).catch(e => { console.error('ล็อกอินบอตไม่สำเร็จ:', e.message); process.exitCode = 1; });
