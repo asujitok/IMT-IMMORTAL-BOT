@@ -1,316 +1,108 @@
 'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, '..', 'data', 'db.json');
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'imt-bot-test-'));
+process.env.DATA_FILE = path.join(dir, 'db.json');
+const store = require('../src/store');
+const delivery = require('../src/delivery');
+const guild = 'testguild';
+const date = '2026-09-25';
 
-function load() {
-  if (!fs.existsSync(DATA_FILE)) return { guilds: {} };
-  const obj = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  if (!obj || typeof obj !== 'object' || !obj.guilds) throw new Error('รูปแบบไฟล์ข้อมูลไม่ถูกต้อง');
-  return obj;
-}
-function save(db) {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  const temp = DATA_FILE + '.' + process.pid + '.' + randomUUID() + '.tmp';
-  fs.writeFileSync(temp, JSON.stringify(db, null, 2), { mode: 0o600 });
-  fs.renameSync(temp, DATA_FILE);
-}
-function guild(db, guildId) {
-  db.guilds[guildId] ||= { config: null, items: [], attendance: {}, inventory: {}, sent: {} };
-  return db.guilds[guildId];
-}
-function today(now = new Date()) {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
-  }).format(now);
-}
-function timeBangkok(now = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
-  }).formatToParts(now);
-  return parts.find(x => x.type === 'hour').value + ':' + parts.find(x => x.type === 'minute').value;
-}
-function getGuild(id) { return load().guilds[id] || null; }
-function getGuildIds() { return Object.keys(load().guilds); }
-function update(id, fn) {
-  const db = load();
-  const g = guild(db, id);
-  const result = fn(g);
-  save(db);
-  return result;
-}
-function setConfig(id, config) { update(id, g => { g.config = { ...(g.config || {}), ...config }; }); }
-function addItem(id, name, requiredQty) {
-  return update(id, g => {
-    if (g.items.some(i => i.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      throw new Error('มีชื่อรายการนี้อยู่แล้ว');
-    }
-    const item = { id: randomUUID(), name, requiredQty };
-    g.items.push(item);
-    return item;
-  });
-}
-function removeItem(id, itemId) {
-  return update(id, g => {
-    const idx = g.items.findIndex(i => i.id === itemId);
-    if (idx < 0) throw new Error('ไม่พบรายการของ');
-    return g.items.splice(idx, 1)[0];
-  });
-}
-function attendance(id, date, userId, status, reason = '', expectedSnapshot) {
-  if (!['present', 'late', 'leave'].includes(status)) throw new Error('สถานะเช็กชื่อไม่ถูกต้อง');
-  if (typeof reason !== 'string') throw new Error('เหตุผลไม่ถูกต้อง');
-  reason = reason.trim();
-  if (status === 'present' && reason) throw new Error('สถานะมาไม่ต้องระบุเหตุผล');
-  if (status !== 'present' && (reason.length < 3 || reason.length > 250)) {
-    throw new Error('มาสายและลาต้องระบุเหตุผล 3–250 ตัวอักษร');
-  }
-  return update(id, g => {
-    g.attendance[date] ||= {};
-    const previous = g.attendance[date][userId] || null;
-    if (expectedSnapshot !== undefined && JSON.stringify(previous) !== expectedSnapshot) {
-      throw new Error('ข้อมูลเช็กชื่อมีการเปลี่ยนแปลงแล้ว กรุณาเริ่มทำรายการใหม่');
-    }
-    if (previous?.status === status && (previous.reason || '') === reason) {
-      return { previous, unchanged: true, record: previous };
-    }
-    const record = { status, reason, at: new Date().toISOString(), revision: randomUUID() };
-    g.attendance[date][userId] = record;
-    return { previous, unchanged: false, record };
-  });
-}
-// ยืนยันลาเป็นช่วงวันในธุรกรรมเดียว ป้องกันการบันทึกค้างเพียงครึ่งช่วง
-function attendanceRange(id, dates, userId, reason, expectedSnapshots) {
-  if (!Array.isArray(dates) || !dates.length || dates.length > 31 || new Set(dates).size !== dates.length) {
-    throw new Error('ช่วงวันลาไม่ถูกต้อง');
-  }
-  if (typeof reason !== 'string' || reason.trim().length < 3 || reason.trim().length > 250) {
-    throw new Error('การลาต้องมีเหตุผล 3–250 ตัวอักษร');
-  }
-  if (!expectedSnapshots || typeof expectedSnapshots !== 'object') throw new Error('ข้อมูลยืนยันไม่ครบ');
-  return update(id, g => {
-    const changes = [];
-    // ตรวจสอบทุกวันก่อนแก้ไขแม้แต่วันเดียว
-    for (const date of dates) {
-      const previous = g.attendance?.[date]?.[userId] || null;
-      if (!Object.hasOwn(expectedSnapshots, date) || JSON.stringify(previous) !== expectedSnapshots[date]) {
-        throw new Error('ข้อมูลเช็กชื่อระหว่างช่วงวันลามีการเปลี่ยนแปลง กรุณาเริ่มใหม่');
-      }
-      changes.push({ date, previous, unchanged: previous?.status === 'leave' && previous.reason === reason.trim() });
-    }
-    const at = new Date().toISOString();
-    for (const entry of changes) {
-      if (entry.unchanged) continue;
-      g.attendance[entry.date] ||= {};
-      g.attendance[entry.date][userId] = {
-        status: 'leave', reason: reason.trim(), at, revision: randomUUID(),
-        leaveRange: { from: dates[0], to: dates[dates.length - 1] }
-      };
-    }
-    return { changes, unchanged: changes.every(x => x.unchanged) };
-  });
-}
-// ถ้าอ่านสมาชิกไม่ได้ ห้ามสร้างวันขาดย้อนหลังจากรายชื่อปัจจุบัน
-function saveRosterAtClose(id, date, userIds) {
-  if (!Array.isArray(userIds)) throw new Error('ต้องมีรายชื่อสมาชิกจริงที่อ่านได้');
-  return update(id, g => {
-    g.rostersAtClose ||= {};
-    if (g.rostersAtClose[date]) return false;
-    g.rostersAtClose[date] = [...new Set(userIds)];
-    return true;
-  });
-}
-function saveHistoryView(id, view) {
-  return update(id, g => { g.historyViews ||= {}; g.historyViews[view.messageId] = view; });
-}
-function removeHistoryView(id, messageId) {
-  return update(id, g => {
-    if (!g.historyViews?.[messageId]) return false;
-    delete g.historyViews[messageId]; return true;
-  });
-}
-function inventory(id, date, userId, itemId, foundQty, condition, note = '') {
-  return update(id, g => {
-    const item = g.items.find(i => i.id === itemId);
-    if (!item) throw new Error('รายการนี้ถูกลบหรือไม่มีอยู่แล้ว');
-    g.inventory[date] ||= {};
-    g.inventory[date][userId] ||= {};
-    const previous = g.inventory[date][userId][itemId] || null;
-    g.inventory[date][userId][itemId] = {
-      name: item.name, requiredQty: item.requiredQty, foundQty, condition, note,
-      at: new Date().toISOString()
-    };
-    return { item, previous };
-  });
-}
-
-
-function normName(name) {
-  const value = String(name || '').trim();
-  if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
-  return value;
-}
-function normUnit(unit = 'ชิ้น') {
-  const value = String(unit || 'ชิ้น').trim();
-  if (!value || value.length > 20 || /[\r\n]/.test(value)) throw new Error('หน่วยต้องมี 1–20 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
-  return value;
-}
-function deliveryItemUpsert(id, name, quantity, unit = 'ชิ้น') {
-  name = normName(name); unit = normUnit(unit);
-  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 0–1,000,000,000,000');
-  return update(id, g => {
-    g.deliveryItems ||= [];
-    const entry = g.deliveryItems.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (entry) { entry.requiredQty = quantity; entry.unit = unit; return { entry, created: false }; }
-    const created = { id: randomUUID(), name, requiredQty: quantity, unit };
-    g.deliveryItems.push(created); return { entry: created, created: true };
-  });
-}
-function deliveryItemRemove(id, name) {
-  name = normName(name);
-  return update(id, g => {
-    g.deliveryItems ||= [];
-    const idx = g.deliveryItems.findIndex(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (idx < 0) throw new Error('ไม่พบรายการของที่ต้องส่ง');
-    return g.deliveryItems.splice(idx, 1)[0];
-  });
-}
-function deliveryItemRemoveById(id, itemId) {
-  itemId = String(itemId || '').trim();
-  if (!itemId) throw new Error('รายการของที่ต้องส่งไม่ถูกต้อง');
-  return update(id, g => {
-    g.deliveryItems ||= [];
-    const idx = g.deliveryItems.findIndex(x => x.id === itemId);
-    if (idx < 0) throw new Error('ไม่พบรายการของที่ต้องส่ง');
-    return g.deliveryItems.splice(idx, 1)[0];
-  });
-}
-function deliveryRoleAdd(id, roleId) {
-  roleId = String(roleId || '').trim();
-  if (!roleId) throw new Error('Role ไม่ถูกต้อง');
-  return update(id, g => {
-    g.deliveryManagerRoleIds ||= [];
-    if (!g.deliveryManagerRoleIds.includes(roleId)) g.deliveryManagerRoleIds.push(roleId);
-    return [...g.deliveryManagerRoleIds];
-  });
-}
-function deliveryRoleRemove(id, roleId) {
-  roleId = String(roleId || '').trim();
-  return update(id, g => {
-    g.deliveryManagerRoleIds ||= [];
-    g.deliveryManagerRoleIds = g.deliveryManagerRoleIds.filter(x => x !== roleId);
-    return [...g.deliveryManagerRoleIds];
-  });
-}
-function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
-  name = normName(name); unit = normUnit(unit);
-  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
-  return update(id, g => {
-    g.locker ||= [];
-    const entry = g.locker.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (entry) {
-      const beforeQty = entry.quantity;
-      const next = entry.quantity + quantity;
-      if (!Number.isSafeInteger(next)) throw new Error('ยอดรวมเกินจำนวนที่ระบบรองรับ');
-      entry.quantity = next;
-      if (unit) entry.unit = unit;
-      return { entry, created: false, beforeQty, afterQty: entry.quantity };
-    }
-    const created = { id: randomUUID(), name, quantity, unit };
-    g.locker.push(created);
-    return { entry: created, created: true, beforeQty: 0, afterQty: quantity };
-  });
-}
-
-// ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
-function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
-  name = String(name || '').trim(); unit = String(unit || '').trim();
-  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
-  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
-  return update(id, g => {
-    g.locker ||= [];
-    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
-    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
-  });
-}
-function lockerEdit(id, name, quantity, unit = null) {
-  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
-  return update(id, g => {
-    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
-    if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    entry.quantity = quantity;
-    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
-    return entry;
-  });
-}
-function lockerRemove(id, name) {
-  return update(id, g => {
-    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
-    if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    return g.locker.splice(idx, 1)[0];
-  });
-}
-
-
-function deliveryLogAdd(id, type, data = {}) {
-  if (!type || typeof type !== 'string') throw new Error('ประเภทประวัติส่งของไม่ถูกต้อง');
-  return update(id, g => {
-    g.deliveryHistory ||= [];
-    const seq = (g.deliveryHistory.at(-1)?.seq || 0) + 1;
-    const entry = {
-      id: 'DL-' + String(seq).padStart(6, '0'), seq, type,
-      date: data.date || today(), at: new Date().toISOString(),
-      actorId: data.actorId || null, userId: data.userId || null, reviewerId: data.reviewerId || null,
-      deliveryId: data.deliveryId || null, itemName: data.itemName || null,
-      quantity: Number.isSafeInteger(data.quantity) ? data.quantity : null,
-      unit: data.unit || null, status: data.status || null, lockerAction: data.lockerAction || null,
-      beforeQty: Number.isSafeInteger(data.beforeQty) ? data.beforeQty : null,
-      afterQty: Number.isSafeInteger(data.afterQty) ? data.afterQty : null,
-      note: data.note || null
-    };
-    g.deliveryHistory.push(entry);
-    if (g.deliveryHistory.length > 1000) g.deliveryHistory.splice(0, g.deliveryHistory.length - 1000);
-    return entry;
-  });
-}
-function deliveryHistory(id, { userId = null, itemName = null, date = null, limit = 10 } = {}) {
-  const g = getGuild(id);
-  let rows = [...(g?.deliveryHistory || [])];
-  if (userId) rows = rows.filter(x => x.userId === userId || x.actorId === userId || x.reviewerId === userId);
-  if (itemName) {
-    const target = String(itemName).trim().toLocaleLowerCase();
-    rows = rows.filter(x => String(x.itemName || '').toLocaleLowerCase().includes(target));
-  }
-  if (date) rows = rows.filter(x => x.date === date);
-  return rows.reverse().slice(0, Math.max(1, Math.min(Number(limit) || 10, 25)));
-}
-
-
-function deliveryResetRows(id, date) {
-  date = String(date || today()).trim();
-  return update(id, g => {
-    g.deliveries ||= {};
-    const removed = g.deliveries[date] || [];
-    g.deliveries[date] = [];
-    return { date, count: removed.length };
-  });
-}
-function deliveryResetItems(id) {
-  return update(id, g => {
-    g.deliveryItems ||= [];
-    const removed = g.deliveryItems;
-    g.deliveryItems = [];
-    return { count: removed.length, items: removed };
-  });
-}
-
-function markSent(id, date, kind) {
-  update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
-}
-module.exports = {
-  DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
-  attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
-  deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
-  deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
-};
+test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+test('ชื่อและจำนวนส่งของถูกตรวจสอบ ป้องกันข้อมูลไม่ถูกต้อง', () => {
+  assert.throws(() => delivery.prepare(guild, 'a', '', 3, date), /ชื่อ/);
+  assert.throws(() => delivery.prepare(guild, 'a', 'หิน', 0, date), /จำนวน/);
+  assert.throws(() => delivery.prepare(guild, 'a', 'เงิน', 1e20, date), /จำนวน/);
+});
+test('ตรวจยืนยันเฉพาะผู้ส่ง และกดยืนยันซ้ำไม่ได้', () => {
+  const p = delivery.prepare(guild, 'a', 'เงิน', 1000000, date);
+  assert.throws(() => delivery.take(p.id, guild, 'b'), /ไม่ใช่ของคุณ/);
+  const result = delivery.take(p.id, guild, 'a');
+  assert.equal(result.quantity, 1000000);
+  assert.throws(() => delivery.take(p.id, guild, 'a'), /หมดอายุ|แทนที่/);
+});
+test('ส่งของ: ✅/❌ เปลี่ยนเฉพาะสถานะ ไม่แก้ยอดตู้แก๊ง และไม่บันทึกซ้ำ', () => {
+  // ตั้งยอดตู้เอง: การรับของต้องไม่เพิ่มยอด 1,000,000 โดยอัตโนมัติ
+  store.lockerAdd(guild, 'เงิน', 400, 'หน่วย');
+  const record = delivery.submit(guild, delivery.prepare(guild, 'a', 'เงิน', 1000000, date));
+  delivery.attachMessage(guild, date, record.id, 'ch1', 'msg1');
+  assert.equal(delivery.findByMessage(guild, 'msg1').entry.id, record.id);
+  assert.equal(delivery.review(guild, date, record.id, 'approved', 'mod').entry.status, 'approved');
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 400);
+  assert.equal(delivery.review(guild, date, record.id, 'approved', 'mod').unchanged, true);
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 400);
+  assert.equal(delivery.review(guild, date, record.id, 'rejected', 'mod').entry.status, 'rejected');
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 400);
+});
+test('การส่งใหม่แทนรายการถูกปฏิเสธ และบล็อกการตรวจรายการเก่า', () => {
+  const row = delivery.list(store.getGuild(guild), date)[0];
+  const replacement = delivery.submit(guild, delivery.prepare(guild, 'a', 'เงิน', 500000, date));
+  assert.throws(() => delivery.review(guild, date, row.id, 'approved', 'mod'), /แทนที่/);
+  assert.equal(delivery.list(store.getGuild(guild), date).length, 1);
+  assert.equal(delivery.review(guild, date, replacement.id, 'approved', 'mod').entry.quantity, 500000);
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 400);
+});
+test('ตู้แก๊งเพิ่มชื่อเดิมเป็นการบวกยอด แก้ไข ลบ และแปลงชื่อเงินได้', () => {
+  const item = store.lockerAdd(guild, 'หิน', 5);
+  assert.equal(item.quantity, 5);
+  assert.equal(store.lockerAdd(guild, 'หิน', 3).quantity, 8);
+  assert.equal(store.lockerEdit(guild, 'หิน', 10).quantity, 10);
+  assert.equal(store.lockerRemove(guild, 'หิน').name, 'หิน');
+  assert.equal(store.lockerAdd(guild, 'red money', 100, 'บาท').name, 'เงินแดง');
+  assert.equal(store.lockerAdd(guild, 'money', 200, 'บาท').name, 'เงินเขียว');
+  assert.equal(store.lockerSummary(store.getGuild(guild)).moneyTotal, 300);
+});
+test('รายงานแจ้งผู้ส่งแล้ว/ขาดส่ง/ยังไม่ส่ง ตามเวลาสรุป', () => {
+  const roster = [{id:'a'},{id:'b'}];
+  const g = store.getGuild(guild);
+  assert.match(delivery.summary(g, date, roster, '20:00','19:30'), /<@a> ✅/);
+  assert.match(delivery.summary(g, date, roster, '20:00','19:30'), /<@b> ⬜/);
+  assert.match(delivery.summary(g, date, roster, '20:00','20:01'), /<@b> ❌/);
+  assert.match(delivery.summary(g, date, null, '20:00','20:01'), /SERVER MEMBERS INTENT/);
+});
+test('ลด/ลบยอดในตู้แก๊งไม่เปลี่ยนรายงานส่งของ และไม่กีดกันการปฏิเสธย้อนหลัง', () => {
+  store.lockerEdit(guild, 'เงิน', 0);
+  const entry = delivery.list(store.getGuild(guild), date)[0];
+  assert.equal(entry.status, 'approved');
+  assert.equal(delivery.review(guild, date, entry.id, 'rejected', 'mod').entry.status, 'rejected');
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 0);
+  // แก้กลับเป็นอนุมัติอีกครั้ง ต้องไม่เพิ่มยอดตู้
+  assert.equal(delivery.review(guild, date, entry.id, 'approved', 'mod').entry.status, 'approved');
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน').quantity, 0);
+  store.lockerRemove(guild, 'เงิน');
+  assert.equal(store.getGuild(guild).locker.find(x => x.name === 'เงิน'), undefined);
+  assert.equal(delivery.list(store.getGuild(guild), date)[0].status, 'approved');
+});
+test('สองระบบใช้ชื่อของเดียวกันได้โดยไม่รบกวนกัน', () => {
+  const stock = store.lockerAdd(guild, 'น้ำมัน', 10, 'ชิ้น');
+  const record = delivery.submit(guild, delivery.prepare(guild, 'b', 'น้ำมัน', 4, date));
+  assert.equal(delivery.review(guild, date, record.id, 'approved', 'mod').entry.status, 'approved');
+  assert.equal(store.getGuild(guild).locker.find(x => x.id === stock.id).quantity, 10);
+  assert.equal(store.lockerEdit(guild, 'น้ำมัน', 7).quantity, 7);
+  assert.equal(delivery.list(store.getGuild(guild), date).find(x => x.id === record.id).quantity, 4);
+  store.lockerRemove(guild, 'น้ำมัน');
+  assert.equal(delivery.list(store.getGuild(guild), date).find(x => x.id === record.id).status, 'approved');
+});
+test('ยืนยันการส่งชื่อของใหม่ที่ไม่เคยมีในตู้ ต้องไม่สร้างของใหม่ในตู้', () => {
+  const record = delivery.submit(guild, delivery.prepare(guild, 'c', 'เหล็ก', 9, date));
+  delivery.review(guild, date, record.id, 'approved', 'mod');
+  assert.equal((store.getGuild(guild).locker || []).some(x => x.name === 'เหล็ก'), false);
+});
+test('ประวัติส่งของบันทึกและกรองได้ พร้อมกันการนำเข้าตู้ซ้ำ', () => {
+  const rec = delivery.submit(guild, delivery.prepare(guild, 'hist-user', 'red ticket', 3, date, 'ชิ้น'));
+  store.deliveryLogAdd(guild, 'submitted', { date, userId: 'hist-user', deliveryId: rec.id, itemName: rec.name, quantity: rec.quantity, unit: rec.unit, status: 'pending' });
+  delivery.review(guild, date, rec.id, 'approved', 'mod');
+  const mark1 = delivery.markLockerAction(guild, date, rec.id, 'imported', 'mod');
+  assert.equal(mark1.unchanged, false);
+  const change = store.lockerIncrease(guild, rec.name, rec.quantity, rec.unit);
+  store.deliveryLogAdd(guild, 'locker_imported', { date, userId: rec.userId, actorId: 'mod', deliveryId: rec.id, itemName: rec.name, quantity: rec.quantity, unit: rec.unit, lockerAction: 'imported', beforeQty: change.beforeQty, afterQty: change.afterQty });
+  const mark2 = delivery.markLockerAction(guild, date, rec.id, 'imported', 'mod');
+  assert.equal(mark2.unchanged, true);
+  const rows = store.deliveryHistory(guild, { itemName: 'red ticket', limit: 5 });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].type, 'locker_imported');
+  assert.equal(rows[1].type, 'submitted');
+});
