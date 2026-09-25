@@ -19,7 +19,7 @@ module.exports = [
     .addStringOption(o => o.setName('reason').setDescription('เหตุผลกรณีมาสายหรือลา (ถ้าไม่ใส่ จะมีช่องให้กรอก)').setMaxLength(250))
     .addStringOption(o => o.setName('start').setDescription('เฉพาะลา: วันแรก เช่น 22/09/2569 หรือ 2026-09-22'))
     .addStringOption(o => o.setName('end').setDescription('เฉพาะลา: วันสุดท้าย เว้นว่างคือวันแรก')),
-  new SlashCommandBuilder().setName('leave').setDescription('แจ้งลาวันเดียวหรือหลายวัน พร้อมเหตุผล (ลาได้ทั้งวัน)')
+  new SlashCommandBuilder()  .setName('leave').setDescription('แจ้งลาวันเดียวหรือหลายวัน พร้อมเหตุผล').addStringOption(o => o
     .addStringOption(o => o.setName('start').setDescription('วันเริ่มลา เช่น 26/09/2569 หรือ 2026-09-26').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('วันสุดท้าย เว้นว่างคือวันแรก'))
     .addStringOption(o => o.setName('end').setDescription('เหตุผลการลา (3–250 ตัวอักษร)').setRequired(true).setMinLength(3).setMaxLength(250)),
