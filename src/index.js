@@ -19,6 +19,7 @@ const hasLogo = fs.existsSync(logoFile);
 const token = process.env.DISCORD_TOKEN;
 const deliveryLogWebhookUrl = process.env.DELIVERY_LOG_WEBHOOK_URL || '';
 const vaultLogWebhookUrl = process.env.VAULT_LOG_WEBHOOK_URL || process.env.VAULT_LOG || process.env.Vault_log || '';
+const timeLogWebhookUrl = process.env.TIME_LOG_WEBHOOK_URL || process.env.TIME_LOG || process.env.Time_log || '';
 if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
@@ -45,6 +46,21 @@ function displayItemName(value) {
   return raw;
 }
 function itemLabel(value) { return sanitize(displayItemName(value)); }
+function nextDateISO(date) {
+  const [y, m, d] = String(date || '').split('-').map(Number);
+  if (!y || !m || !d) return store.today();
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  return next.toISOString().slice(0, 10);
+}
+function attendanceStatusLabel(status) {
+  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || sanitize(status || '-');
+}
+function attendanceWebhookColor(status) {
+  return ({ present: 0x2ECC71, late: 0xF1C40F, leave: 0x95A5A6 })[status] || 0x5865F2;
+}
+function timeFooterText(kind = 'Time Log') {
+  return `[IMT] IMMORTAL • ${kind} • เวลาไทย`;
+}
 function onlyTeam(i, g) {
   const roles = i.member?.roles;
   return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
@@ -287,6 +303,10 @@ async function confirmAttendance(i, id) {
   if (result.unchanged) {
     return await i.editReply({ content: 'ข้อมูลนี้ได้รับการบันทึกไว้แล้ว ไม่ส่งประกาศซ้ำ', components: [] });
   }
+  postTimeWebhook(attendanceActionWebhookPayload({
+    guildId: i.guildId, userId: i.user.id, status: pending.status, reason: pending.reason,
+    dates: range, actorId: i.user.id, isEdit: Boolean(!multi && result.previous)
+  }), 'time attendance').catch(e => console.error('ส่ง Time_log เช็กชื่อไม่สำเร็จ:', e.message));
   // ข้อมูลไม่ออกไป Google/ระบบภายนอก: บันทึก JSON ในเครื่อง + อัปเดตข้อความรายงานใน Discord
   let dashboardUpdated = false;
   try { dashboardUpdated = range.includes(pending.date) ? await refreshDashboard(i.guild, pending.date) : true; }
@@ -570,6 +590,82 @@ async function recordDeliveryLog(guildId, type, data = {}) {
   return log;
 }
 
+async function postTimeWebhook(payload, label = 'time') {
+  if (!timeLogWebhookUrl) return false;
+  const response = await fetch(timeLogWebhookUrl, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`${label} webhook ล้มเหลว: ${response.status}`);
+  return true;
+}
+function attendanceActionWebhookPayload({ guildId, userId, status, reason = '', dates = [], actorId = null, isEdit = false }) {
+  const rangeText = dates.length > 1 ? `${dates[0]} → ${dates[dates.length - 1]} (${dates.length} วัน)` : (dates[0] || store.today());
+  return {
+    username: 'IMT Time Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: `${isEdit ? '🔄 แก้ไขเช็กชื่อ' : '📋 บันทึกเช็กชื่อ'} — ${attendanceStatusLabel(status)}`,
+      color: attendanceWebhookColor(status),
+      fields: [
+        { name: 'สมาชิก', value: `<@${userId}>`, inline: true },
+        actorId ? { name: 'ผู้ดำเนินการ', value: `<@${actorId}>`, inline: true } : null,
+        { name: 'สถานะ', value: attendanceStatusLabel(status), inline: true },
+        { name: 'วันที่', value: rangeText, inline: false },
+        reason ? { name: 'เหตุผล', value: sanitize(reason), inline: false } : null,
+        { name: 'Guild', value: guildId, inline: true }
+      ].filter(Boolean),
+      footer: { text: timeFooterText('Time Log') },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+function attendanceDailyGroups(g, date, roster = null) {
+  const entries = Object.entries(g.attendance?.[date] || {});
+  const groups = { present: [], late: [], leave: [] };
+  for (const [id, record] of entries) if (groups[record.status]) groups[record.status].push({ id, ...record });
+  const missing = Array.isArray(roster) ? roster.filter(m => !(g.attendance?.[date] || {})[m.id]).map(m => ({ id: m.id })) : [];
+  return { ...groups, missing };
+}
+function cumulativeAttendanceText(g, roster = null, date = store.today()) {
+  const ids = new Set();
+  if (Array.isArray(roster)) for (const m of roster) ids.add(m.id);
+  for (const users of Object.values(g.attendance || {})) for (const id of Object.keys(users || {})) ids.add(id);
+  for (const list of Object.values(g.rostersAtClose || {})) if (Array.isArray(list)) for (const id of list) ids.add(id);
+  const next = nextDateISO(date);
+  const rows = [...ids].map(id => {
+    const e = history.entries(g, id, next);
+    return { id, late: e.late.length, leave: e.leave.length, missing: e.missing.length };
+  }).filter(x => x.late || x.leave || x.missing)
+    .sort((a, b) => (b.missing - a.missing) || (b.late - a.late) || (b.leave - a.leave) || a.id.localeCompare(b.id));
+  if (!rows.length) return 'ยังไม่มีแต้มสะสม ขาด/ลา/มาสาย';
+  return rows.slice(0, 20).map((x, idx) => `${idx + 1}. <@${x.id}> — ขาด ${x.missing} | ลา ${x.leave} | มาสาย ${x.late}`).join('\n') +
+    (rows.length > 20 ? `\n…และอีก ${rows.length - 20} คน` : '');
+}
+function attendanceDailySummaryPayload(g, date, roster = null) {
+  const groups = attendanceDailyGroups(g, date, roster);
+  const total = groups.present.length + groups.late.length + groups.leave.length;
+  const line = (rows, empty = 'ไม่มี') => rows.length ? rows.slice(0, 20).map((x, idx) => `${idx + 1}. <@${x.id}>`).join('\n') + (rows.length > 20 ? `\n…และอีก ${rows.length - 20} คน` : '') : empty;
+  return {
+    username: 'IMT Time Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: `📋 สรุปเช็กชื่อประจำวัน • ${date}`,
+      description: `สรุปอัตโนมัติเวลา **23:59 ประเทศไทย**\nหลังส่งสรุปแล้วระบบวันใหม่จะเริ่มนับใหม่ แต่แต้มสะสม ขาด/ลา/มาสาย จะทบต่อไปเรื่อย ๆ`,
+      color: 0x5865F2,
+      fields: [
+        { name: `✅ มา (${groups.present.length} คน)`, value: line(groups.present), inline: false },
+        { name: `🕒 มาสาย (${groups.late.length} คน)`, value: line(groups.late), inline: false },
+        { name: `📝 ลา (${groups.leave.length} คน)`, value: line(groups.leave), inline: false },
+        Array.isArray(roster) ? { name: `❌ ขาด/ยังไม่เช็ก (${groups.missing.length} คน)`, value: line(groups.missing), inline: false } : { name: '❌ ขาด/ยังไม่เช็ก', value: 'ยังไม่สามารถแสดงรายชื่อทั้งหมดได้ ต้องเปิด SERVER MEMBERS INTENT และกำหนด Role สมาชิก', inline: false },
+        { name: '📊 รวมเช็กวันนี้', value: `${total}${Array.isArray(roster) ? `/${roster.length}` : ''} คน`, inline: true },
+        { name: '🏅 แต้มสะสม ขาด / ลา / มาสาย', value: cumulativeAttendanceText(g, roster, date).slice(0, 1024), inline: false }
+      ],
+      footer: { text: timeFooterText('Daily Summary') },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
 async function postSummaryWebhook(url, payload, label) {
   if (!url) return false;
   const response = await fetch(url, {
@@ -601,6 +697,12 @@ async function dailyWebhookSummaries() {
     if (guild && g.config) {
       try { roster = await optionalRoster(guild, g.config); }
       catch { roster = null; }
+    }
+    if (timeLogWebhookUrl && !g.sent?.[date]?.timeWebhookSummary) {
+      try {
+        await postTimeWebhook(attendanceDailySummaryPayload(g, date, roster), 'time summary');
+        store.markSent(id, date, 'timeWebhookSummary');
+      } catch (e) { console.error('ส่งสรุป webhook เช็กชื่อ 23:59 ไม่สำเร็จ:', e.message); }
     }
     if (deliveryLogWebhookUrl && !g.sent?.[date]?.deliveryWebhookSummary) {
       const text = delivery.summary(g, date, roster, g.config?.time || '20:00', '23:59') +
@@ -1310,6 +1412,7 @@ client.once(Events.ClientReady, c => {
     cleanupHistoryViews().catch(console.error);
   }, { timezone: 'Asia/Bangkok' });
   dailySummaries().catch(console.error);
+  dailyWebhookSummaries().catch(console.error);
   ensureDailyDashboard().catch(console.error);
   cleanupHistoryViews().catch(console.error);
 });
