@@ -4,47 +4,6 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, '..', 'data', 'db.json');
 
-const INITIAL_LOCKER = Object.freeze([
-  { name: 'ผลึกทะเล', quantity: 2, unit: 'ชิ้น' },
-  { name: 'เศษผลึกทะเล', quantity: 39, unit: 'ชิ้น' },
-  { name: 'red ticket', quantity: 13, unit: 'ชิ้น' },
-  { name: 'ซีเมน', quantity: 4, unit: 'ชิ้น' },
-  { name: 'supply loop', quantity: 15, unit: 'ชิ้น' },
-  { name: 'weapon box', quantity: 8, unit: 'ชิ้น' },
-  { name: 'red money', quantity: 3299, unit: 'บาท' },
-  { name: 'event token', quantity: 3, unit: 'ชิ้น' }
-]);
-function initialLocker() {
-  return INITIAL_LOCKER.map(x => ({ id: randomUUID(), ...x }));
-}
-function ensureGuildShape(g) {
-  g.config ||= null;
-  g.items ||= [];
-  g.attendance ||= {};
-  g.inventory ||= {};
-  g.sent ||= {};
-  if (!Array.isArray(g.locker)) g.locker = initialLocker();
-  if (!Array.isArray(g.lockerManagerRoleIds)) g.lockerManagerRoleIds = [];
-  return g;
-}
-function normalizeName(name) {
-  const value = String(name || '').trim();
-  if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
-  return value;
-}
-function normalizeUnit(unit = 'ชิ้น') {
-  const value = String(unit || '').trim();
-  if (!value || value.length > 20 || /[\r\n]/.test(value)) throw new Error('หน่วยไม่ถูกต้อง');
-  return value;
-}
-function validLockerQuantity(quantity, { allowZero = true } = {}) {
-  if (!Number.isSafeInteger(quantity) || quantity < (allowZero ? 0 : 1)) {
-    throw new Error(allowZero ? 'จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป' : 'จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป');
-  }
-  return quantity;
-}
-
-
 function load() {
   if (!fs.existsSync(DATA_FILE)) return { guilds: {} };
   const obj = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -58,8 +17,8 @@ function save(db) {
   fs.renameSync(temp, DATA_FILE);
 }
 function guild(db, guildId) {
-  db.guilds[guildId] ||= { config: null, items: [], attendance: {}, inventory: {}, sent: {}, locker: initialLocker(), lockerManagerRoleIds: [] };
-  return ensureGuildShape(db.guilds[guildId]);
+  db.guilds[guildId] ||= { config: null, items: [], attendance: {}, inventory: {}, sent: {} };
+  return db.guilds[guildId];
 }
 function today(now = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -72,7 +31,7 @@ function timeBangkok(now = new Date()) {
   }).formatToParts(now);
   return parts.find(x => x.type === 'hour').value + ':' + parts.find(x => x.type === 'minute').value;
 }
-function getGuild(id) { const g = load().guilds[id] || null; return g ? ensureGuildShape(g) : null; }
+function getGuild(id) { return load().guilds[id] || null; }
 function getGuildIds() { return Object.keys(load().guilds); }
 function update(id, fn) {
   const db = load();
@@ -186,19 +145,57 @@ function inventory(id, date, userId, itemId, foundQty, condition, note = '') {
   });
 }
 
-// ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
-function lockerSummary(g) {
-  ensureGuildShape(g);
-  const rows = g.locker || [];
-  const moneyTotal = rows.reduce((sum, x) => {
-    const name = String(x.name || '').toLocaleLowerCase();
-    const unit = String(x.unit || '').trim();
-    return sum + ((unit === 'บาท' || name.includes('money') || name.includes('เงิน')) ? Number(x.quantity || 0) : 0);
-  }, 0);
-  return { totalItems: rows.length, moneyTotal, rows };
+
+function normName(name) {
+  const value = String(name || '').trim();
+  if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
+  return value;
 }
-function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
-  name = normalizeName(name); unit = normalizeUnit(unit); quantity = validLockerQuantity(quantity, { allowZero: false });
+function normUnit(unit = 'ชิ้น') {
+  const value = String(unit || 'ชิ้น').trim();
+  if (!value || value.length > 20 || /[\r\n]/.test(value)) throw new Error('หน่วยต้องมี 1–20 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
+  return value;
+}
+function deliveryItemUpsert(id, name, quantity, unit = 'ชิ้น') {
+  name = normName(name); unit = normUnit(unit);
+  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 0–1,000,000,000,000');
+  return update(id, g => {
+    g.deliveryItems ||= [];
+    const entry = g.deliveryItems.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (entry) { entry.requiredQty = quantity; entry.unit = unit; return { entry, created: false }; }
+    const created = { id: randomUUID(), name, requiredQty: quantity, unit };
+    g.deliveryItems.push(created); return { entry: created, created: true };
+  });
+}
+function deliveryItemRemove(id, name) {
+  name = normName(name);
+  return update(id, g => {
+    g.deliveryItems ||= [];
+    const idx = g.deliveryItems.findIndex(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (idx < 0) throw new Error('ไม่พบรายการของที่ต้องส่ง');
+    return g.deliveryItems.splice(idx, 1)[0];
+  });
+}
+function deliveryRoleAdd(id, roleId) {
+  roleId = String(roleId || '').trim();
+  if (!roleId) throw new Error('Role ไม่ถูกต้อง');
+  return update(id, g => {
+    g.deliveryManagerRoleIds ||= [];
+    if (!g.deliveryManagerRoleIds.includes(roleId)) g.deliveryManagerRoleIds.push(roleId);
+    return [...g.deliveryManagerRoleIds];
+  });
+}
+function deliveryRoleRemove(id, roleId) {
+  roleId = String(roleId || '').trim();
+  return update(id, g => {
+    g.deliveryManagerRoleIds ||= [];
+    g.deliveryManagerRoleIds = g.deliveryManagerRoleIds.filter(x => x !== roleId);
+    return [...g.deliveryManagerRoleIds];
+  });
+}
+function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
+  name = normName(name); unit = normUnit(unit);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
   return update(id, g => {
     g.locker ||= [];
     const entry = g.locker.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
@@ -206,74 +203,50 @@ function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
       const next = entry.quantity + quantity;
       if (!Number.isSafeInteger(next)) throw new Error('ยอดรวมเกินจำนวนที่ระบบรองรับ');
       entry.quantity = next;
-      entry.unit = unit || entry.unit;
-      return { ...entry, added: quantity, existed: true };
+      if (unit) entry.unit = unit;
+      return { entry, created: false };
     }
     const created = { id: randomUUID(), name, quantity, unit };
     g.locker.push(created);
-    return { ...created, added: quantity, existed: false };
+    return { entry: created, created: true };
   });
-}
-function lockerEdit(id, name, quantity, unit = null, newName = null) {
-  name = normalizeName(name); quantity = validLockerQuantity(quantity);
-  return update(id, g => {
-    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    const before = { ...entry };
-    if (newName !== null && String(newName).trim()) {
-      const targetName = normalizeName(newName);
-      const duplicate = (g.locker || []).find(x => x.id !== entry.id && x.name.toLocaleLowerCase() === targetName.toLocaleLowerCase());
-      if (duplicate) throw new Error('มีชื่อรายการนี้อยู่แล้ว');
-      entry.name = targetName;
-    }
-    entry.quantity = quantity;
-    if (unit !== null && String(unit).trim()) entry.unit = normalizeUnit(unit);
-    return { ...entry, before };
-  });
-}
-function lockerRemove(id, name, quantity = null) {
-  name = normalizeName(name);
-  return update(id, g => {
-    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    const entry = g.locker[idx];
-    if (quantity === null || quantity === undefined) return g.locker.splice(idx, 1)[0];
-    quantity = validLockerQuantity(quantity, { allowZero: false });
-    if (entry.quantity < quantity) throw new Error(`จำนวนในตู้มีเพียง ${entry.quantity.toLocaleString('en-US')} ${entry.unit}`);
-    entry.quantity -= quantity;
-    const result = { ...entry, removed: quantity, deleted: entry.quantity === 0 };
-    if (entry.quantity === 0) g.locker.splice(idx, 1);
-    return result;
-  });
-}
-function lockerRoleAdd(id, roleId) {
-  if (!roleId) throw new Error('ต้องระบุ Role');
-  return update(id, g => {
-    g.lockerManagerRoleIds ||= [];
-    if (!g.lockerManagerRoleIds.includes(roleId)) g.lockerManagerRoleIds.push(roleId);
-    return [...g.lockerManagerRoleIds];
-  });
-}
-function lockerRoleRemove(id, roleId) {
-  if (!roleId) throw new Error('ต้องระบุ Role');
-  return update(id, g => {
-    g.lockerManagerRoleIds ||= [];
-    g.lockerManagerRoleIds = g.lockerManagerRoleIds.filter(x => x !== roleId);
-    return [...g.lockerManagerRoleIds];
-  });
-}
-function lockerRoles(id) {
-  const g = getGuild(id);
-  return [...(g?.lockerManagerRoleIds || [])];
 }
 
+// ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
+function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
+  name = String(name || '').trim(); unit = String(unit || '').trim();
+  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  return update(id, g => {
+    g.locker ||= [];
+    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
+    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
+  });
+}
+function lockerEdit(id, name, quantity, unit = null) {
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  return update(id, g => {
+    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    entry.quantity = quantity;
+    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
+    return entry;
+  });
+}
+function lockerRemove(id, name) {
+  return update(id, g => {
+    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    return g.locker.splice(idx, 1)[0];
+  });
+}
 
 function markSent(id, date, kind) {
   update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
 }
 module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
-  attendance, attendanceRange, inventory, today, timeBangkok, markSent,
-  INITIAL_LOCKER, lockerSummary, lockerAdd, lockerEdit, lockerRemove, lockerRoleAdd, lockerRoleRemove, lockerRoles,
+  attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
+  deliveryItemUpsert, deliveryItemRemove, deliveryRoleAdd, deliveryRoleRemove,
   saveRosterAtClose, saveHistoryView, removeHistoryView
 };
