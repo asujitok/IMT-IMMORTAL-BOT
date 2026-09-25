@@ -112,13 +112,15 @@ function attendanceRange(id, dates, userId, reason, expectedSnapshots) {
   });
 }
 
-function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = null) {
+function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = null, time = null) {
   date = String(date || today()).trim();
   userId = String(userId || '').trim();
   status = String(status || '').trim();
   reason = String(reason || '').trim();
   actorId = actorId ? String(actorId).trim() : null;
+  time = String(time || timeBangkok()).trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('วันที่ไม่ถูกต้อง กรุณาใช้ YYYY-MM-DD');
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('เวลาไม่ถูกต้อง กรุณาใช้ HH:MM เช่น 18:30');
   if (!/^\d{5,25}$/.test(userId)) throw new Error('สมาชิกไม่ถูกต้อง กรุณาใส่ mention หรือ Discord ID');
   if (!['present', 'late', 'leave', 'clear'].includes(status)) throw new Error('สถานะใหม่ไม่ถูกต้อง');
   if (status !== 'present' && status !== 'clear' && (reason.length < 3 || reason.length > 250)) {
@@ -126,6 +128,7 @@ function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = nu
   }
   if (status === 'present') reason = reason.slice(0, 250);
   if (status === 'clear' && reason.length > 250) reason = reason.slice(0, 250);
+  const editedAt = new Date(`${date}T${time}:00+07:00`).toISOString();
   return update(id, g => {
     g.attendance ||= {};
     g.attendance[date] ||= {};
@@ -134,12 +137,12 @@ function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = nu
     if (status === 'clear') {
       if (previous) delete g.attendance[date][userId];
     } else {
-      record = { status, reason, at: new Date().toISOString(), revision: randomUUID(), adminEditedBy: actorId };
+      record = { status, reason, at: editedAt, revision: randomUUID(), adminEditedBy: actorId };
       g.attendance[date][userId] = record;
     }
     g.attendanceEditHistory ||= [];
     const seq = (g.attendanceEditHistory.at(-1)?.seq || 0) + 1;
-    const log = { id: 'TE-' + String(seq).padStart(6, '0'), seq, date, userId, actorId,
+    const log = { id: 'TE-' + String(seq).padStart(6, '0'), seq, date, time, editedAt, userId, actorId,
       from: previous?.status || null, to: status === 'clear' ? null : status,
       previousReason: previous?.reason || '', reason, at: new Date().toISOString() };
     g.attendanceEditHistory.push(log);
@@ -147,6 +150,7 @@ function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = nu
     return { previous, record, log };
   });
 }
+
 function attendanceEditHistory(id, { userId = null, date = null, limit = 10 } = {}) {
   const g = getGuild(id);
   let rows = [...(g?.attendanceEditHistory || [])];
