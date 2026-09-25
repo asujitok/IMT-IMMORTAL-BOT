@@ -784,10 +784,16 @@ function houseDirectoryPayload(g, page = 0) {
   return { ...ep(lines.join('\n').slice(0, 1900)), components };
 }
 
-const ATTENDANCE_DIRECTORY_PAGE_SIZE = 20;
+const ATTENDANCE_DIRECTORY_PAGE_SIZE = 10;
 function attendanceRecordLabel(record) {
   if (!record) return '⬜ ยังไม่เช็ก';
   return attendanceStatusLabel(record.status);
+}
+function attendanceRecordLine(record) {
+  if (!record) return '⬜ ยังไม่เช็ก';
+  const time = record.time || (record.at ? String(record.at).slice(11, 16) : '');
+  const reason = record.reason ? ` • ${sanitize(record.reason).slice(0, 80)}` : '';
+  return `${attendanceRecordLabel(record)}${time ? ` • เวลา ${time}` : ''}${reason}`;
 }
 async function attendanceDirectoryPayload(i, page = 0) {
   const g = store.getGuild(i.guildId);
@@ -796,34 +802,58 @@ async function attendanceDirectoryPayload(i, page = 0) {
   if (!Array.isArray(roster)) {
     return { ...ep('ยังอ่านรายชื่อสมาชิกไม่ได้\nให้เปิด SERVER MEMBERS INTENT ใน Discord Developer Portal และตั้ง `ENABLE_MEMBERS_INTENT=true` ใน Railway'), components: [] };
   }
+
   const today = store.today();
   const records = g.attendance?.[today] || {};
   const rows = roster
     .map(m => ({ id: m.id, name: m.displayName || m.user?.username || m.id, record: records[m.id] || null }))
     .sort((a, b) => a.name.localeCompare(b.name, 'th'));
+
   if (!rows.length) return { ...ep('📋 ยังไม่มีสมาชิกใน Role ที่ใช้เช็กชื่อ'), components: [] };
+
   const totalPages = Math.max(1, Math.ceil(rows.length / ATTENDANCE_DIRECTORY_PAGE_SIZE));
   page = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
   const start = page * ATTENDANCE_DIRECTORY_PAGE_SIZE;
   const chunk = rows.slice(start, start + ATTENDANCE_DIRECTORY_PAGE_SIZE);
-  const lines = [
-    `📋 **รายชื่อเช็กชื่อปกติทั้งหมด** • ${today}`,
-    `หน้า ${page + 1}/${totalPages} • แสดง ${start + 1}-${start + chunk.length} จาก ${rows.length} คน`,
-    ''
-  ];
+
+  const counts = { present: 0, late: 0, leave: 0, missing: 0 };
+  for (const row of rows) {
+    const st = row.record?.status;
+    if (st === 'present') counts.present++;
+    else if (st === 'late') counts.late++;
+    else if (st === 'leave') counts.leave++;
+    else counts.missing++;
+  }
+
+  const lines = [];
   for (const [idx, row] of chunk.entries()) {
-    const time = row.record?.time || (row.record?.at ? String(row.record.at).slice(11, 16) : '');
-    const reason = row.record?.reason ? ` — ${sanitize(row.record.reason).slice(0, 60)}` : '';
-    lines.push(`${start + idx + 1}. <@${row.id}> — ${attendanceRecordLabel(row.record)}${time ? ` เวลา ${time}` : ''}${reason}`);
+    lines.push(`**${start + idx + 1}.** <@${row.id}>`);
+    lines.push(`└ ${attendanceRecordLine(row.record)}`);
   }
-  const components = [];
-  if (totalPages > 1) {
-    components.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`attendance:list:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
-      new ButtonBuilder().setCustomId(`attendance:list:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
-    ));
-  }
-  return { ...ep(lines.join('\n').slice(0, 1900)), components };
+
+  const embed = new EmbedBuilder()
+    .setTitle('📋 ดูรายชื่อสมาชิกเช็กชื่อปกติ')
+    .setDescription(lines.join('\n').slice(0, 3900))
+    .addFields(
+      { name: 'วันที่', value: today, inline: true },
+      { name: 'หน้า', value: `${page + 1}/${totalPages}`, inline: true },
+      { name: 'สมาชิกทั้งหมด', value: `${rows.length} คน`, inline: true },
+      { name: 'สรุปสถานะ', value: `✅ มา ${counts.present} • 🕒 มาสาย ${counts.late} • 📝 ลา ${counts.leave} • ⬜ ยังไม่เช็ก ${counts.missing}`, inline: false }
+    )
+    .setFooter({ text: 'หน้านี้คือดูรายชื่อเท่านั้น ไม่ใช่รายงานอัตโนมัติ 23:59' });
+
+  const nav = [];
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0));
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary));
+  nav.push(new ButtonBuilder().setCustomId(`attendance:list:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1));
+
+  const payload = {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(nav)],
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: silent
+  };
+  return payload;
 }
 
 function houseListText(g) {
@@ -1307,7 +1337,9 @@ client.on(Events.InteractionCreate, async i => {
       }
       if (i.customId.startsWith('attendance:list:')) {
         const page = Number(i.customId.split(':')[2]) || 0;
-        return await i.update(await attendanceDirectoryPayload(i, page));
+        const payload = await attendanceDirectoryPayload(i, page);
+        delete payload.flags;
+        return await i.update(payload);
       }
 
       if (i.customId === 'attendance:admin:edit') {
