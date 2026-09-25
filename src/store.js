@@ -300,6 +300,24 @@ function lockerRemove(id, name) {
   });
 }
 
+function lockerSummary(guildOrId) {
+  const g = typeof guildOrId === 'string' ? getGuild(guildOrId) : (guildOrId || {});
+  const rows = [...(Array.isArray(g?.locker) ? g.locker : [])]
+    .map(x => ({
+      id: x.id || null,
+      name: String(x.name || '').trim(),
+      quantity: Number(x.quantity || 0),
+      unit: String(x.unit || 'ชิ้น').trim() || 'ชิ้น'
+    }))
+    .filter(x => x.name)
+    .sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  return {
+    rows,
+    totalItems: rows.length,
+    totalQuantity: rows.reduce((sum, x) => sum + (Number.isFinite(x.quantity) ? x.quantity : 0), 0)
+  };
+}
+
 
 function deliveryLogAdd(id, type, data = {}) {
   if (!type || typeof type !== 'string') throw new Error('ประเภทประวัติส่งของไม่ถูกต้อง');
@@ -353,12 +371,124 @@ function deliveryResetItems(id) {
   });
 }
 
+
+function normHouseName(name) {
+  const value = String(name || '').trim();
+  if (!value || value.length > 50 || /[\r\n]/.test(value)) throw new Error('ชื่อบ้านต้องมี 1–50 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
+  return value;
+}
+function ensureHouseFields(g) {
+  g.houses ||= [];
+  g.houseAttendance ||= {};
+  g.houseAttendanceHistory ||= [];
+}
+function houseList(id) {
+  const g = getGuild(id);
+  return [...(g?.houses || [])];
+}
+function houseAdd(id, name) {
+  name = normHouseName(name);
+  return update(id, g => {
+    ensureHouseFields(g);
+    if (g.houses.some(h => h.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีบ้านชื่อนี้อยู่แล้ว');
+    const house = { id: randomUUID().slice(0, 12), name, leaderId: null, memberIds: [] };
+    g.houses.push(house);
+    return house;
+  });
+}
+function houseFind(g, houseRef) {
+  ensureHouseFields(g);
+  const ref = String(houseRef || '').trim().toLocaleLowerCase();
+  const house = g.houses.find(h => h.id === houseRef || h.name.toLocaleLowerCase() === ref);
+  if (!house) throw new Error('ไม่พบบ้านนี้');
+  house.memberIds ||= [];
+  return house;
+}
+function houseRemove(id, houseRef) {
+  return update(id, g => {
+    ensureHouseFields(g);
+    const idx = g.houses.findIndex(h => h.id === houseRef || h.name.toLocaleLowerCase() === String(houseRef||'').trim().toLocaleLowerCase());
+    if (idx < 0) throw new Error('ไม่พบบ้านนี้');
+    const [removed] = g.houses.splice(idx, 1);
+    return removed;
+  });
+}
+function houseLeaderSet(id, houseRef, leaderId) {
+  leaderId = String(leaderId || '').trim();
+  if (!/^\d{5,25}$/.test(leaderId)) throw new Error('หัวหน้าบ้านไม่ถูกต้อง');
+  return update(id, g => {
+    const house = houseFind(g, houseRef);
+    house.leaderId = leaderId;
+    return house;
+  });
+}
+function houseMemberAdd(id, houseRef, userId) {
+  userId = String(userId || '').trim();
+  if (!/^\d{5,25}$/.test(userId)) throw new Error('สมาชิกไม่ถูกต้อง');
+  return update(id, g => {
+    const house = houseFind(g, houseRef);
+    // สมาชิก 1 คนอยู่ได้บ้านเดียว: ลบออกจากบ้านอื่นก่อน
+    for (const h of g.houses) h.memberIds = (h.memberIds || []).filter(x => x !== userId);
+    house.memberIds ||= [];
+    if (!house.memberIds.includes(userId)) house.memberIds.push(userId);
+    return house;
+  });
+}
+function houseMemberRemove(id, houseRef, userId) {
+  userId = String(userId || '').trim();
+  return update(id, g => {
+    const house = houseFind(g, houseRef);
+    house.memberIds = (house.memberIds || []).filter(x => x !== userId);
+    return house;
+  });
+}
+function housesForLeader(id, leaderId) {
+  leaderId = String(leaderId || '').trim();
+  const g = getGuild(id);
+  return (g?.houses || []).filter(h => h.leaderId === leaderId);
+}
+function houseMark(id, date, houseId, targetId, status, actorId, reason = '') {
+  date = String(date || today()).trim();
+  houseId = String(houseId || '').trim();
+  targetId = String(targetId || '').trim();
+  status = String(status || '').trim();
+  actorId = String(actorId || '').trim();
+  reason = String(reason || '').trim().slice(0, 250);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('วันที่ไม่ถูกต้อง');
+  if (!/^\d{5,25}$/.test(targetId)) throw new Error('สมาชิกไม่ถูกต้อง');
+  if (!['present', 'late', 'leave'].includes(status)) throw new Error('สถานะเช็กชื่อบ้านไม่ถูกต้อง');
+  return update(id, g => {
+    const house = houseFind(g, houseId);
+    if (!(house.memberIds || []).includes(targetId)) throw new Error('สมาชิกคนนี้ไม่ได้อยู่ในบ้านนี้');
+    g.houseAttendance[date] ||= {};
+    g.houseAttendance[date][house.id] ||= {};
+    const previous = g.houseAttendance[date][house.id][targetId] || null;
+    const record = { status, reason, at: new Date().toISOString(), actorId, revision: randomUUID() };
+    g.houseAttendance[date][house.id][targetId] = record;
+    const seq = (g.houseAttendanceHistory.at(-1)?.seq || 0) + 1;
+    const log = { id: 'HE-' + String(seq).padStart(6, '0'), seq, date, houseId: house.id, houseName: house.name,
+      userId: targetId, actorId, from: previous?.status || null, to: status, previousReason: previous?.reason || '', reason, at: record.at };
+    g.houseAttendanceHistory.push(log);
+    if (g.houseAttendanceHistory.length > 1000) g.houseAttendanceHistory.splice(0, g.houseAttendanceHistory.length - 1000);
+    return { house, previous, record, log };
+  });
+}
+function houseAttendanceHistory(id, { houseId = null, userId = null, limit = 10 } = {}) {
+  const g = getGuild(id);
+  let rows = [...(g?.houseAttendanceHistory || [])];
+  if (houseId) rows = rows.filter(x => x.houseId === houseId);
+  if (userId) rows = rows.filter(x => x.userId === userId || x.actorId === userId);
+  return rows.reverse().slice(0, Math.max(1, Math.min(Number(limit) || 10, 25)));
+}
+
 function markSent(id, date, kind) {
   update(id, g => { g.sent[date] ||= {}; g.sent[date][kind] = true; });
 }
 module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
-  attendance, attendanceRange, attendanceAdminEdit, attendanceEditHistory, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
+  attendance, attendanceRange, attendanceAdminEdit, attendanceEditHistory, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease, lockerSummary,
   deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
-  deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
+  deliveryLogAdd, deliveryHistory,
+  houseAdd, houseRemove, houseList, houseLeaderSet, houseMemberAdd, houseMemberRemove, housesForLeader, houseMark, houseAttendanceHistory,
+  saveRosterAtClose, saveHistoryView, removeHistoryView
 };
