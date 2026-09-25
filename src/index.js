@@ -21,13 +21,6 @@ const deliveryLogWebhookUrl = process.env.DELIVERY_LOG_WEBHOOK_URL || '';
 const vaultLogWebhookUrl = process.env.VAULT_LOG_WEBHOOK_URL || process.env.VAULT_LOG || process.env.Vault_log || '';
 const timeLogWebhookUrl = process.env.TIME_LOG_WEBHOOK_URL || process.env.TIME_LOG || process.env.Time_log || '';
 const homeLogWebhookUrl = process.env.HOME_LOG_WEBHOOK_URL || process.env.HOME_LOG || process.env.home_log || process.env.Home_log || process.env.homeLog || '';
-const reminderLogWebhookUrl = process.env.REMINDER_LOG_WEBHOOK_URL || process.env.REMINDER_LOG || process.env.reminder_log || '';
-const homeReminderWebhookUrl = process.env.HOME_REMINDER_LOG_WEBHOOK_URL || process.env.HOME_REMINDER_LOG || process.env.home_reminder_log || reminderLogWebhookUrl || '';
-const disciplineLogWebhookUrl = process.env.DISCIPLINE_LOG_WEBHOOK_URL || process.env.DISCIPLINE_LOG || process.env.discipline_log || '';
-const weeklyLogWebhookUrl = process.env.WEEKLY_LOG_WEBHOOK_URL || process.env.WEEKLY_LOG || process.env.weekly_log || '';
-const adminLogWebhookUrl = process.env.ADMIN_LOG_WEBHOOK_URL || process.env.ADMIN_LOG || process.env.admin_log || '';
-const backupLogWebhookUrl = process.env.BACKUP_LOG_WEBHOOK_URL || process.env.BACKUP_LOG || process.env.backup_log || '';
-const profileLogWebhookUrl = process.env.PROFILE_LOG_WEBHOOK_URL || process.env.PROFILE_LOG || process.env.profile_log || '';
 if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
@@ -66,10 +59,10 @@ function nextDateISO(date) {
   return next.toISOString().slice(0, 10);
 }
 function attendanceStatusLabel(status) {
-  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || sanitize(status || '-');
+  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา', absent: '❌ ขาด' })[status] || sanitize(status || '-');
 }
 function attendanceWebhookColor(status) {
-  return ({ present: 0x2ECC71, late: 0xF1C40F, leave: 0x95A5A6 })[status] || 0x5865F2;
+  return ({ present: 0x2ECC71, late: 0xF1C40F, leave: 0x95A5A6, absent: 0xE74C3C })[status] || 0x5865F2;
 }
 function timeFooterText(kind = 'Time Log') {
   return `[IMT] IMMORTAL • ${kind} • เวลาไทย`;
@@ -79,25 +72,8 @@ function onlyTeam(i, g) {
   return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
     Boolean(g?.config && (roles?.cache?.has(g.config.roleId) || roles?.includes?.(g.config.roleId)));
 }
-function isHouseMember(g, userId) {
-  return Boolean((g?.houses || []).some(h => Array.isArray(h.memberIds) && h.memberIds.includes(userId)));
-}
-function canUseDelivery(i, g) {
-  return onlyTeam(i, g) || isHouseMember(g, i.user.id);
-}
 function manager(i) { return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild); }
 function ep(content) { return { content, flags: MessageFlags.Ephemeral, allowedMentions: silent }; }
-function longEmbed(title, description, color = 0x5865F2) {
-  return {
-    embeds: [new EmbedBuilder()
-      .setTitle(String(title || 'รายงาน').slice(0, 250))
-      .setDescription(String(description || '-').slice(0, 4090))
-      .setColor(color)
-      .setTimestamp()],
-    flags: MessageFlags.Ephemeral,
-    allowedMentions: silent
-  };
-}
 function configOf(i) {
   const g = store.getGuild(i.guildId);
   if (!g?.config) throw new Error('ยังไม่ได้ตั้งค่า กรุณาให้ผู้ดูแลใช้ /setup ก่อน');
@@ -502,13 +478,6 @@ function deliveryRequiredText(g) {
   return '📋 **ของที่ต้องส่ง**\n' + rows.map((x, idx) =>
     `${idx + 1}. ${itemLabel(x.name)} — ${Number(x.requiredQty || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n').slice(0, 1900);
 }
-function deliveryStatusQuickComponents() {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger)
-  )];
-}
-
 function deliveryRequiredComponents(g) {
   // Discord แสดงปุ่มได้สูงสุด 5 แถว/ข้อความ และ 5 ปุ่ม/แถว
   // จัดแบบ 1 รายการ = ปุ่มส่ง + ปุ่มยกเลิกของผู้ดูแล เพื่อให้ปุ่มอยู่ข้างกัน
@@ -530,8 +499,6 @@ function deliveryRequiredComponents(g) {
         .setStyle(ButtonStyle.Danger)
     ));
   }
-  // แถวด้านล่างของรายงานสด: เอาปุ่มที่ซ้ำกับ Panel หลักออก
-  // เหลือเฉพาะปุ่ม Reset ที่เกี่ยวกับรายงานนี้โดยตรง
   components.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('delivery:reset-rows').setLabel('🔄 Reset รายชื่อ').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delivery:reset-items').setLabel('🧹 Reset ของ').setStyle(ButtonStyle.Danger)
@@ -743,7 +710,7 @@ function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, t
 
 
 function houseStatusLabel(status) {
-  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || '⬜ ยังไม่เช็ก';
+  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา', absent: '❌ ขาด' })[status] || '⬜ ยังไม่เช็ก';
 }
 function houseRecordLine(record) {
   if (!record) return '⬜ ยังไม่เช็ก';
@@ -801,8 +768,7 @@ function housePanelComponents(houseId = null) {
   if (houseId) {
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`house:member-add-open:${houseId}`).setLabel('➕ เพิ่มสมาชิก').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`house:member-remove-open:${houseId}`).setLabel('➖ ลบสมาชิก').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`house:reset:${houseId}`).setLabel('🔄 Reset วันนี้').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId(`house:member-remove-open:${houseId}`).setLabel('➖ ลบสมาชิก').setStyle(ButtonStyle.Danger)
     ));
   }
   return rows;
@@ -845,12 +811,13 @@ function houseDirectoryPayload(g, page = 0, houseId = null) {
   for (const h of houses) {
     const records = day[h.id] || {};
     const memberIds = h.memberIds || [];
-    const groups = { present: [], late: [], leave: [], missing: [] };
+    const groups = { present: [], late: [], leave: [], absent: [], missing: [] };
     for (const id of memberIds) {
       const st = records[id]?.status;
       if (st === 'present') groups.present.push(id);
       else if (st === 'late') groups.late.push(id);
       else if (st === 'leave') groups.leave.push(id);
+      else if (st === 'absent') groups.absent.push(id);
       else groups.missing.push(id);
     }
     const show = (title, arr, statusKey) => {
@@ -868,12 +835,13 @@ function houseDirectoryPayload(g, page = 0, houseId = null) {
     show('✅ มา', groups.present, 'present');
     show('🕒 มาสาย', groups.late, 'late');
     show('📝 ลา', groups.leave, 'leave');
+    show('❌ ขาด', groups.absent, 'absent');
     show('⬜ ยังไม่เช็ก', groups.missing, 'missing');
   }
   const embed = new EmbedBuilder()
     .setTitle(selectedHouse ? `📋 รายชื่อบ้าน ${sanitize(selectedHouse.name)}` : '📋 รายชื่อเช็กชื่อตามบ้าน')
     .setDescription(lines.join('\n').slice(0, 3900))
-    .setFooter({ text: 'เช็กชื่อบ้านแยกจากเช็กชื่อปกติ • แยกตามสถานะ มา / มาสาย / ลา / ยังไม่เช็ก' });
+    .setFooter({ text: 'เช็กชื่อบ้านแยกจากเช็กชื่อปกติ • แยกตามสถานะ มา / มาสาย / ลา / ขาด / ยังไม่เช็ก' });
   const target = houseId || 'all';
   const components = [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`house:list:refresh:${target}:0`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary)
@@ -955,16 +923,21 @@ function houseSummaryText(g, date = store.today(), houseFilter = null) {
   for (const h of houses) {
     const rows = day[h.id] || {};
     const members = h.memberIds || [];
-    const present = [], late = [], leave = [], missing = [];
+    const present = [], late = [], leave = [], absent = [], missing = [];
     for (const id of members) {
       const st = rows[id]?.status;
-      if (st === 'present') present.push(id); else if (st === 'late') late.push(id); else if (st === 'leave') leave.push(id); else missing.push(id);
+      if (st === 'present') present.push(id);
+      else if (st === 'late') late.push(id);
+      else if (st === 'leave') leave.push(id);
+      else if (st === 'absent') absent.push(id);
+      else missing.push(id);
     }
     const mention = arr => arr.length ? arr.map(id => `<@${id}>`).join(', ') : '-';
     lines.push(`\n🏠 **${sanitize(h.name)}**${h.leaderId ? ` — หัวหน้า <@${h.leaderId}>` : ''}`);
     lines.push(`✅ มา (${present.length}): ${mention(present)}`);
     lines.push(`🕒 มาสาย (${late.length}): ${mention(late)}`);
     lines.push(`📝 ลา (${leave.length}): ${mention(leave)}`);
+    lines.push(`❌ ขาด (${absent.length}): ${mention(absent)}`);
     lines.push(`⬜ ยังไม่เช็ก (${missing.length}): ${mention(missing)}`);
   }
   return lines.join('\n').slice(0, 3900);
@@ -974,26 +947,6 @@ function houseHistoryText(g, houseId = null, limit = 10) {
   const filtered = rows.filter(x => !houseId || x.houseId === houseId).slice(-limit).reverse();
   if (!filtered.length) return '📜 ยังไม่มีประวัติเช็กชื่อบ้าน';
   return '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + filtered.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
-}
-function houseResetWebhookPayload({ guildId, house, actorId, date, count }) {
-  return {
-    username: 'IMT Home Log',
-    allowed_mentions: { parse: [] },
-    embeds: [{
-      title: '🔄 HOME LOG — Reset เช็กชื่อบ้านวันนี้',
-      color: 0xADB5BD,
-      fields: [
-        { name: 'บ้าน', value: sanitize(house.name), inline: true },
-        { name: 'ผู้ดำเนินการ', value: `<@${actorId}>`, inline: true },
-        { name: 'วันที่', value: date, inline: true },
-        { name: 'จำนวนสถานะที่ล้าง', value: `${count} รายการ`, inline: true },
-        { name: 'หมายเหตุ', value: 'ล้างเฉพาะสถานะเช็กชื่อบ้านวันนี้ ไม่ลบรายชื่อสมาชิก/หัวหน้าบ้าน และไม่กระทบเช็กชื่อปกติ', inline: false },
-        { name: 'Guild', value: guildId, inline: true }
-      ],
-      footer: { text: '[IMT] IMMORTAL • Home Log • เวลาไทย' },
-      timestamp: new Date().toISOString()
-    }]
-  };
 }
 function houseTimeWebhookPayload({ guildId, house, targetId, actorId, status, previous, log }) {
   return {
@@ -1140,175 +1093,6 @@ async function dailyWebhookSummaries() {
     }
   }
 }
-
-function simpleWebhookPayload(username, title, description, color = 0x5865F2, fields = []) {
-  return {
-    username,
-    allowed_mentions: { parse: [] },
-    embeds: [{
-      title: String(title || 'IMT Log').slice(0, 256),
-      description: String(description || '-').slice(0, 3900),
-      color,
-      fields: fields.filter(Boolean).slice(0, 25),
-      footer: { text: '[IMT] IMMORTAL • เวลาไทย' },
-      timestamp: new Date().toISOString()
-    }]
-  };
-}
-async function postGenericWebhook(url, payload, label) {
-  if (!url) return false;
-  const response = await fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error(`${label} webhook ล้มเหลว: ${response.status}`);
-  return true;
-}
-function dayStatusGroups(g, date, roster = null) {
-  const records = g?.attendance?.[date] || {};
-  const present = [], late = [], leave = [], missing = [];
-  const rosterRows = Array.isArray(roster) ? roster : [];
-  const ids = rosterRows.length ? rosterRows.map(m => m.id) : Object.keys(records);
-  for (const id of ids) {
-    const rec = records[id] || null;
-    const row = { id, record: rec };
-    if (rec?.status === 'present') present.push(row);
-    else if (rec?.status === 'late') late.push(row);
-    else if (rec?.status === 'leave') leave.push(row);
-    else missing.push(row);
-  }
-  return { present, late, leave, missing, total: ids.length };
-}
-function statusList(rows, empty = 'ไม่มี') {
-  if (!rows.length) return empty;
-  return rows.slice(0, 25).map((x, idx) => {
-    const t = x.record?.at ? String(x.record.at).slice(11, 16) : '';
-    const r = x.record?.reason ? ` — ${sanitize(x.record.reason)}` : '';
-    return `${idx + 1}. <@${x.id}>${t ? ` เวลา ${t}` : ''}${r}`;
-  }).join('\n') + (rows.length > 25 ? `\n…และอีก ${rows.length - 25} คน` : '');
-}
-function reminderPayload(g, date, roster, minuteLabel = '') {
-  const groups = dayStatusGroups(g, date, roster);
-  return simpleWebhookPayload('IMT Reminder Log', `🔔 เตือนเช็กชื่อ • ${date}`, `ยังไม่เช็กชื่อ **${groups.missing.length} คน** จากสมาชิก **${groups.total} คน**${minuteLabel ? `\nรอบแจ้งเตือน: **${minuteLabel}**` : ''}\n\n${statusList(groups.missing)}`, 0xFEE75C);
-}
-function houseReminderPayload(g, date) {
-  const houses = g?.houses || [];
-  const day = g?.houseAttendance?.[date] || {};
-  const lines = [];
-  for (const h of houses) {
-    const records = day[h.id] || {};
-    const members = h.memberIds || [];
-    const missing = members.filter(id => !records[id]);
-    if (missing.length) lines.push(`🏠 **${sanitize(h.name)}** ${h.leaderId ? `หัวหน้า <@${h.leaderId}>` : 'ยังไม่ตั้งหัวหน้า'}\nยังไม่เช็ก ${missing.length}/${members.length} คน\n${missing.slice(0, 15).map((id, idx) => `${idx + 1}. <@${id}>`).join('\n')}${missing.length > 15 ? `\n…และอีก ${missing.length - 15} คน` : ''}`);
-  }
-  return simpleWebhookPayload('IMT Home Reminder Log', `🏠 เตือนหัวหน้าบ้าน • ${date}`, lines.length ? lines.join('\n\n').slice(0, 3900) : 'ทุกบ้านเช็กชื่อครบแล้ว', 0x57F287);
-}
-function attendanceScoreFor(g, userId, endDate = store.today()) {
-  let present = 0, late = 0, leave = 0, missing = 0, deliveryApproved = 0, deliveryRejected = 0, deliveryPending = 0;
-  const scoreMap = { present: 1, late: -1, leave: 0, missing: -3, deliveryApproved: 1, deliveryRejected: -2, deliveryPending: 0 };
-  for (const [date, records] of Object.entries(g?.attendance || {})) {
-    if (date > endDate) continue;
-    const rec = records?.[userId];
-    if (rec?.status === 'present') present++;
-    else if (rec?.status === 'late') late++;
-    else if (rec?.status === 'leave') leave++;
-  }
-  for (const [date, roster] of Object.entries(g?.rostersAtClose || {})) {
-    if (date > endDate) continue;
-    if (Array.isArray(roster) && roster.includes(userId) && !g?.attendance?.[date]?.[userId]) missing++;
-  }
-  for (const rows of Object.values(g?.delivery || {})) {
-    if (!Array.isArray(rows)) continue;
-    for (const r of rows) if (r.userId === userId) {
-      if (r.status === 'approved') deliveryApproved++;
-      else if (r.status === 'rejected') deliveryRejected++;
-      else if (r.status === 'pending') deliveryPending++;
-    }
-  }
-  const score = present*scoreMap.present + late*scoreMap.late + missing*scoreMap.missing + deliveryApproved*scoreMap.deliveryApproved + deliveryRejected*scoreMap.deliveryRejected;
-  return { score, present, late, leave, missing, deliveryApproved, deliveryRejected, deliveryPending };
-}
-function allKnownMemberIds(g, roster = null) {
-  const ids = new Set();
-  if (Array.isArray(roster)) for (const m of roster) ids.add(m.id);
-  for (const records of Object.values(g?.attendance || {})) for (const id of Object.keys(records || {})) ids.add(id);
-  for (const arr of Object.values(g?.rostersAtClose || {})) if (Array.isArray(arr)) for (const id of arr) ids.add(id);
-  for (const h of g?.houses || []) for (const id of h.memberIds || []) ids.add(id);
-  return [...ids];
-}
-function disciplineReportText(g, roster = null, date = store.today(), limit = 20) {
-  const rows = allKnownMemberIds(g, roster).map(id => ({ id, ...attendanceScoreFor(g, id, date) }))
-    .sort((a,b) => b.score - a.score || a.id.localeCompare(b.id));
-  if (!rows.length) return 'ยังไม่มีข้อมูลคะแนนวินัย';
-  const top = rows.slice(0, limit).map((x, idx) => `${idx + 1}. <@${x.id}> — คะแนน **${x.score}** | มา ${x.present} | สาย ${x.late} | ลา ${x.leave} | ขาด ${x.missing} | ส่งผ่าน ${x.deliveryApproved} | ไม่รับ ${x.deliveryRejected}`).join('\n');
-  const bad = rows.filter(x => x.score < 0).slice(0, 10).map((x, idx) => `${idx + 1}. <@${x.id}> — ${x.score}`).join('\n') || 'ไม่มี';
-  return `🏆 **อันดับคะแนนวินัย**\n${top}\n\n⚠️ **คะแนนติดลบ**\n${bad}`.slice(0, 3900);
-}
-function profileText(g, userId, roster = null) {
-  const date = store.today();
-  const att = g?.attendance?.[date]?.[userId] || null;
-  const house = (g?.houses || []).find(h => (h.memberIds || []).includes(userId));
-  const hrec = house ? g?.houseAttendance?.[date]?.[house.id]?.[userId] : null;
-  const sc = attendanceScoreFor(g, userId, date);
-  const deliveryRows = Object.values(g?.delivery || {}).flat().filter(x => x.userId === userId).slice(-5).reverse();
-  return `👤 **โปรไฟล์สมาชิก**\nสมาชิก: <@${userId}>\nบ้าน: ${house ? `🏠 ${sanitize(house.name)}` : 'ยังไม่อยู่บ้าน'}\nเช็กชื่อวันนี้: ${att ? attendanceNames[att.status] : '⬜ ยังไม่เช็ก'}${att?.reason ? ` — ${sanitize(att.reason)}` : ''}\nเช็กชื่อบ้านวันนี้: ${hrec ? houseStatusLabel(hrec.status) : '⬜ ยังไม่เช็ก'}\nคะแนนวินัย: **${sc.score}**\nมา ${sc.present} | มาสาย ${sc.late} | ลา ${sc.leave} | ขาด ${sc.missing}\nส่งผ่าน ${sc.deliveryApproved} | ไม่รับ ${sc.deliveryRejected} | รอตรวจ ${sc.deliveryPending}\n\n📦 **ส่งของล่าสุด**\n${deliveryRows.length ? deliveryRows.map((x, idx) => `${idx + 1}. ${itemLabel(x.name)} ${x.quantity} ${sanitize(x.unit || 'ชิ้น')} — ${x.status}`).join('\n') : 'ยังไม่มีข้อมูลส่งของ'}`.slice(0, 1900);
-}
-function weeklyReportPayload(guildId, g, roster = null, date = store.today()) {
-  const discipline = disciplineReportText(g, roster, date, 15);
-  return simpleWebhookPayload('IMT Weekly Log', `📊 สรุปรายสัปดาห์ • ${date}`, `${discipline}\n\n🏠 **สรุปบ้านวันนี้**\n${houseSummaryText(g, date).slice(0, 1200)}`, 0x9B59B6);
-}
-function backupPayload(guildId, g) {
-  const safe = JSON.stringify({ guildId, generatedAt: new Date().toISOString(), date: store.today(), data: g }, null, 2);
-  return simpleWebhookPayload('IMT Backup Log', `💾 Backup ข้อมูล • ${store.today()}`, `ข้อมูลสำรอง JSON อยู่ใน code block ด้านล่าง\n\n\`\`\`json\n${safe.slice(0, 3300)}\n\`\`\``, 0x95A5A6);
-}
-function adminDashboardComponents() {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('admin:profile').setLabel('👤 โปรไฟล์ฉัน').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('admin:discipline').setLabel('🏆 คะแนนวินัย').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('admin:weekly').setLabel('📊 สรุปรายสัปดาห์').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('admin:backup').setLabel('💾 Backup').setStyle(ButtonStyle.Secondary)
-  )];
-}
-function adminDashboardText() {
-  return `🧭 **Admin Dashboard**\nรวมระบบใหม่ v2.2\n\n- 🔔 เตือนคนยังไม่เช็กชื่อ\n- 🏠 เตือนหัวหน้าบ้าน\n- 🏆 คะแนนวินัย\n- 👤 โปรไฟล์สมาชิก\n- 📊 สรุปรายสัปดาห์\n- 💾 Backup ข้อมูล\n\nปุ่มนี้ใช้สำหรับดูข้อมูลหลักแบบเร็ว`; 
-}
-async function reminderSchedules() {
-  const t = store.timeBangkok();
-  if (!['19:30', '19:50'].includes(t)) return;
-  const date = store.today();
-  for (const id of store.getGuildIds()) {
-    const g = store.getGuild(id); if (!g?.config) continue;
-    if (g.sent?.[date]?.[`reminder_${t}`]) continue;
-    const guild = client.guilds.cache.get(id); if (!guild) continue;
-    let roster = null; try { roster = await optionalRoster(guild, g.config); } catch {}
-    if (Array.isArray(roster) && reminderLogWebhookUrl) await postGenericWebhook(reminderLogWebhookUrl, reminderPayload(g, date, roster, t), 'reminder').catch(e => console.error('ส่ง reminder ไม่สำเร็จ:', e.message));
-    if (homeReminderWebhookUrl && (g.houses || []).length) await postGenericWebhook(homeReminderWebhookUrl, houseReminderPayload(g, date), 'home reminder').catch(e => console.error('ส่ง home reminder ไม่สำเร็จ:', e.message));
-    store.markSent(id, date, `reminder_${t}`);
-  }
-}
-async function weeklyAndBackupSchedules() {
-  const date = store.today(), t = store.timeBangkok();
-  const day = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Bangkok', weekday: 'short' }).format(new Date());
-  for (const id of store.getGuildIds()) {
-    const g = store.getGuild(id); if (!g) continue;
-    const guild = client.guilds.cache.get(id);
-    let roster = null;
-    if (guild && g.config) { try { roster = await optionalRoster(guild, g.config); } catch {} }
-    if (t === '23:55' && backupLogWebhookUrl && !g.sent?.[date]?.backupWebhook) {
-      await postGenericWebhook(backupLogWebhookUrl, backupPayload(id, g), 'backup').catch(e => console.error('ส่ง backup webhook ไม่สำเร็จ:', e.message));
-      store.markSent(id, date, 'backupWebhook');
-    }
-    if (t === '23:58' && day === 'Sun' && weeklyLogWebhookUrl && !g.sent?.[date]?.weeklyWebhook) {
-      await postGenericWebhook(weeklyLogWebhookUrl, weeklyReportPayload(id, g, roster, date), 'weekly').catch(e => console.error('ส่ง weekly webhook ไม่สำเร็จ:', e.message));
-      store.markSent(id, date, 'weeklyWebhook');
-    }
-    if (t === '23:57' && disciplineLogWebhookUrl && !g.sent?.[date]?.disciplineWebhook) {
-      await postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัยประจำวัน • ${date}`, disciplineReportText(g, roster, date, 20), 0xE67E22), 'discipline').catch(e => console.error('ส่ง discipline webhook ไม่สำเร็จ:', e.message));
-      store.markSent(id, date, 'disciplineWebhook');
-    }
-  }
-}
-
 function deliveryItemModal() {
   return new ModalBuilder().setTitle('สร้าง/แก้ไขของที่ต้องส่ง').setCustomId('delivery:item-modal')
     .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name')
@@ -1319,32 +1103,6 @@ function deliveryItemModal() {
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit')
       .setLabel('หน่วย').setPlaceholder('เช่น ชิ้น หรือ บาท').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(20)));
 }
-
-function deliveryStatusEditModal(fromStatus, toStatus) {
-  const title = fromStatus === 'rejected'
-    ? 'เปลี่ยน ไม่รับ → รับแล้ว'
-    : 'เปลี่ยน รับแล้ว → ไม่รับ';
-  const modal = new ModalBuilder()
-    .setCustomId(`delivery:statusedit:${fromStatus}:${toStatus}`)
-    .setTitle(title.slice(0, 45));
-  const member = new TextInputBuilder()
-    .setCustomId('member')
-    .setLabel('สมาชิก (Mention หรือ Discord ID)')
-    .setPlaceholder('@สมาชิก หรือ 123456789012345678')
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(80);
-  const note = new TextInputBuilder()
-    .setCustomId('note')
-    .setLabel('หมายเหตุ (ไม่บังคับ)')
-    .setPlaceholder('เช่น ตรวจใหม่แล้ว / กดผิด')
-    .setStyle(TextInputStyle.Paragraph)
-    .setRequired(false)
-    .setMaxLength(250);
-  modal.addComponents(new ActionRowBuilder().addComponents(member), new ActionRowBuilder().addComponents(note));
-  return modal;
-}
-
 async function refreshDeliveryDashboard(guild, date = store.today()) {
   const key = `${guild.id}:${date}:delivery`;
   const previous = deliveryQueue.get(key) || Promise.resolve();
@@ -1391,7 +1149,7 @@ function deliveryModal() {
 }
 async function beginDelivery(i, name, quantity, unit = 'ชิ้น') {
   const g = configOf(i);
-  if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน ถึงจะส่งของได้');
+  if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
   if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้กำหนดห้องส่งของ ให้ผู้ดูแลใช้ /delivery setchannel ก่อน');
   const item = delivery.prepare(i.guildId, i.user.id, name, quantity, store.today(), unit || 'ชิ้น');
   const row = new ActionRowBuilder().addComponents(
@@ -1401,7 +1159,7 @@ async function beginDelivery(i, name, quantity, unit = 'ชิ้น') {
 }
 async function confirmDelivery(i, id) {
   const g = configOf(i);
-  if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน ถึงจะยืนยันส่งของได้');
+  if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
   const p = delivery.take(id, i.guildId, i.user.id);
   await i.deferUpdate();
   if (p.date !== store.today()) throw new Error('ข้ามวันแล้ว กรุณาส่งของใหม่');
@@ -1438,63 +1196,6 @@ async function reviewDeliveryFromButton(i, id, outcome) {
   await i.message.edit({ content: receiptText(result.entry), components: deliveryReviewComponents(result.entry), allowedMentions: silent });
   await refreshDeliveryDashboard(i.guild, match.date);
 }
-
-async function updateDeliveryReceiptMessage(guild, entry) {
-  if (!entry?.channelId || !entry?.messageId) return false;
-  try {
-    const ch = await guild.channels.fetch(entry.channelId);
-    if (!ch?.isTextBased()) return false;
-    const msg = await ch.messages.fetch(entry.messageId);
-    await msg.edit({ content: receiptText(entry), components: deliveryReviewComponents(entry), allowedMentions: silent });
-    return true;
-  } catch (e) {
-    console.error('อัปเดตข้อความรายการส่งของไม่สำเร็จ:', e.message);
-    return false;
-  }
-}
-
-async function applyDeliveryStatusEditFromModal(i, fromStatus, toStatus) {
-  const g = configOf(i);
-  requireDeliveryManager(i, g);
-  const targetId = parseDiscordUserId(i.fields.getTextInputValue('member'));
-  const note = i.fields.getTextInputValue('note').trim();
-  const date = store.today();
-  await i.deferReply({ flags: MessageFlags.Ephemeral });
-
-  const latestGuild = store.getGuild(i.guildId);
-  const rows = delivery.list(latestGuild, date)
-    .filter(x => x.userId === targetId && x.status === fromStatus && !x.supersededBy)
-    .sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
-  if (!rows.length) {
-    const fromText = fromStatus === 'rejected' ? 'ไม่รับ' : 'รับแล้ว';
-    return await i.editReply(`ไม่พบรายการสถานะ **${fromText}** ของ <@${targetId}> ในวันนี้`);
-  }
-
-  let changed = 0;
-  for (const row of rows) {
-    const result = delivery.review(i.guildId, date, row.id, toStatus, i.user.id);
-    if (!result.unchanged) {
-      changed++;
-      await recordDeliveryLog(i.guildId, toStatus === 'approved' ? 'approved' : 'rejected', {
-        date,
-        userId: result.entry.userId,
-        actorId: i.user.id,
-        reviewerId: i.user.id,
-        deliveryId: result.entry.id,
-        itemName: result.entry.name,
-        quantity: result.entry.quantity,
-        unit: result.entry.unit,
-        status: result.entry.status,
-        note: note || `แก้จาก ${fromStatus} เป็น ${toStatus} ผ่าน UI รายงานส่งของ`
-      });
-      await updateDeliveryReceiptMessage(i.guild, result.entry);
-    }
-  }
-  await refreshDeliveryDashboard(i.guild, date).catch(e => console.error('รีเฟรชรายงานส่งของหลังแก้สถานะจาก UI:', e.message));
-  const toText = toStatus === 'approved' ? 'รับแล้ว' : 'ไม่รับ';
-  return await i.editReply(`แก้สถานะของ <@${targetId}> เป็น **${toText}** แล้ว ${changed} รายการ`);
-}
-
 async function deliveryLockerAction(i, id, action) {
   const g = configOf(i);
   requireDeliveryManager(i, g);
@@ -1622,7 +1323,8 @@ client.on(Events.InteractionCreate, async i => {
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:present`).setLabel('✅ มา').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:late`).setLabel('🕒 มาสาย').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:leave`).setLabel('📝 ลา').setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:leave`).setLabel('📝 ลา').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`house:mark:${houseId}:${targetId}:absent`).setLabel('❌ ขาด').setStyle(ButtonStyle.Danger)
         );
         return await i.reply({ ...ep(`เลือกสถานะให้ <@${targetId}>\nบ้าน: **${sanitize(house.name)}**`), components: [row] });
       }
@@ -1717,14 +1419,6 @@ client.on(Events.InteractionCreate, async i => {
         const text = '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + rows.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
         return await i.reply(ep(text));
       }
-      if (i.customId.startsWith('house:reset:')) {
-        const houseId = i.customId.substring('house:reset:'.length);
-        const house = store.houseList(i.guildId).find(h => h.id === houseId);
-        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์ Reset เช็กชื่อบ้านนี้');
-        const result = store.houseResetDay(i.guildId, store.today(), houseId, i.user.id);
-        postHomeWebhook(houseResetWebhookPayload({ guildId: i.guildId, house: result.house, actorId: i.user.id, date: result.date, count: result.count }), 'house reset').catch(e => console.error('ส่ง home_log reset เช็กชื่อบ้านไม่สำเร็จ:', e.message));
-        return await i.reply(ep(`🔄 Reset เช็กชื่อบ้านวันนี้แล้ว\nบ้าน: **${sanitize(result.house.name)}**\nวันที่: ${result.date}\nล้างสถานะ: ${result.count} รายการ\nรายชื่อสมาชิกบ้านยังอยู่เหมือนเดิม และไม่กระทบเช็กชื่อปกติ`));
-      }
       if (i.customId.startsWith('house:mark:')) {
         const [, , houseId, targetId, status] = i.customId.split(':');
         const house = store.houseList(i.guildId).find(h => h.id === houseId);
@@ -1774,15 +1468,6 @@ client.on(Events.InteractionCreate, async i => {
       if (['attendance:present', 'attendance:late', 'attendance:leave'].includes(i.customId)) {
         return await beginAttendance(i, i.customId.split(':')[1]);
       }
-      if (i.customId === 'delivery:checklist') {
-        const g = configOf(i);
-        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
-        await i.deferReply({ flags: MessageFlags.Ephemeral });
-        const roster = await optionalRoster(i.guild, g.config);
-        const text = delivery.summary(g, store.today(), roster, g.config.time || '20:00') + `\n\nผู้มียศตรวจของสามารถใช้ปุ่มด้านล่างเพื่อเปลี่ยนสถานะได้ทันที`;
-        const components = deliveryManager(i, g) ? deliveryStatusQuickComponents() : [];
-        return await i.editReply({ content: text.slice(0, 1900), components, allowedMentions: silent });
-      }
       if (i.customId === 'delivery:items-manage') {
         const g = configOf(i);
         requireDeliveryManager(i, g);
@@ -1790,12 +1475,12 @@ client.on(Events.InteractionCreate, async i => {
       }
       if (i.customId === 'delivery:items-list') {
         const g = configOf(i);
-        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         return await i.reply({ ...ep(deliveryRequiredText(g) + ((g.deliveryItems || []).length ? '\n\nกดปุ่มรายการด้านล่างเพื่อส่งของตามจำนวนที่กำหนดได้ทันที โดยไม่ต้องกรอกชื่อ/จำนวนเอง' : '')), components: deliveryRequiredComponents(g) });
       }
       if (i.customId === 'delivery:history') {
         const g = configOf(i);
-        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         return await i.reply(ep(deliveryHistoryTextForGuild(i.guildId, { limit: 10 })));
       }
       if (i.customId === 'delivery:pending') {
@@ -1805,25 +1490,15 @@ client.on(Events.InteractionCreate, async i => {
         const text = rows.length ? rows.slice(0, 20).map(x => `${x.seq}. <@${x.userId}> — ${itemLabel(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n') : 'ไม่มีรายการรอตรวจ';
         return await i.reply(ep('✅ **รายการรอยืนยันวันนี้**\n' + text + '\n\nให้กดปุ่ม ✅ หรือ ❌ ใต้ข้อความรายการนั้นโดยตรง'));
       }
-      if (i.customId === 'delivery:fix:rejected-approved') {
-        const g = configOf(i);
-        requireDeliveryManager(i, g);
-        return await i.showModal(deliveryStatusEditModal('rejected', 'approved'));
-      }
-      if (i.customId === 'delivery:fix:approved-rejected') {
-        const g = configOf(i);
-        requireDeliveryManager(i, g);
-        return await i.showModal(deliveryStatusEditModal('approved', 'rejected'));
-      }
       if (i.customId === 'delivery:open') {
         const g = configOf(i);
-        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
         return await i.showModal(deliveryModal());
       }
       if (i.customId.startsWith('delivery:reqsend:')) {
         const g = configOf(i);
-        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
         const itemId = i.customId.substring('delivery:reqsend:'.length);
         const item = (g.deliveryItems || []).find(x => x.id === itemId);
@@ -1975,11 +1650,6 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       return await beginDelivery(i, i.fields.getTextInputValue('name'), Number(raw), i.fields.getTextInputValue('unit') || 'ชิ้น');
     }
 
-    if (i.isModalSubmit() && i.customId.startsWith('delivery:statusedit:')) {
-      const parts = i.customId.split(':');
-      return await applyDeliveryStatusEditFromModal(i, parts[2], parts[3]);
-    }
-
     if (i.isModalSubmit() && (i.customId.startsWith('house:member-add-modal:') || i.customId.startsWith('house:member-remove-modal:'))) {
       const isAdd = i.customId.startsWith('house:member-add-modal:');
       const houseId = i.customId.split(':')[2];
@@ -2035,29 +1705,6 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (!condition) throw new Error('สภาพต้องเป็น ปกติ, ชำรุด หรือ สูญหาย');
       return await checkItem(i, id, Number(rawQty), condition, i.fields.getTextInputValue('note'));
     }
-
-    if (i.isButton() && i.customId.startsWith('admin:')) {
-      const g = configOf(i);
-      await i.deferReply({ flags: MessageFlags.Ephemeral });
-      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
-      if (i.customId === 'admin:profile') return await i.editReply(profileText(g, i.user.id, roster));
-      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
-      if (i.customId === 'admin:discipline') {
-        const text = disciplineReportText(g, roster, store.today(), 25);
-        if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
-        return await i.editReply(longEmbed(`🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22));
-      }
-      if (i.customId === 'admin:weekly') {
-        const payload = weeklyReportPayload(i.guildId, g, roster, store.today());
-        if (weeklyLogWebhookUrl) postGenericWebhook(weeklyLogWebhookUrl, payload, 'weekly').catch(console.error);
-        return await i.editReply(longEmbed(`📊 สรุปรายสัปดาห์ • ${store.today()}`, payload.embeds?.[0]?.description || '-', 0x9B59B6));
-      }
-      if (i.customId === 'admin:backup') {
-        if (backupLogWebhookUrl) postGenericWebhook(backupLogWebhookUrl, backupPayload(i.guildId, g), 'backup').catch(console.error);
-        return await i.editReply('ส่ง Backup ไปยัง webhook แล้ว ถ้าตั้ง BACKUP_LOG_WEBHOOK_URL ไว้');
-      }
-    }
-
     if (!i.isChatInputCommand()) return;
     if (i.commandName === 'setup') {
       if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
@@ -2166,14 +1813,9 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('delivery:items-manage').setLabel('🛠 สร้าง/แก้ไขของที่ต้องส่ง').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('delivery:checklist').setLabel('📋 เช็คชื่อส่งของ').setStyle(ButtonStyle.Primary)
+          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary)
         );
-        const managerRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger)
-        );
-        await channel.send({ embeds: [embed], components: [row, managerRow], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+        await channel.send({ embeds: [embed], components: [row], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
         await refreshDeliveryDashboard(i.guild);
         return await i.editReply({ content: `ส่ง UI ปุ่มและรายงานสดไปที่ ${channel} แล้ว`, allowedMentions: silent });
       }
@@ -2307,7 +1949,7 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         let sent = 0;
         for (const house of houses) {
           const embed = new EmbedBuilder().setTitle(`🏠 [IMT] IMMORTAL • เช็กชื่อบ้าน ${sanitize(house.name)}`)
-            .setDescription(`ระบบนี้ **แยกจากเช็กชื่อปกติ**\nหัวหน้าบ้าน: ${house.leaderId ? `<@${house.leaderId}>` : 'ยังไม่ตั้ง'}\nลูกบ้าน: ${(house.memberIds || []).length} คน\nสถานะในปุ่ม 📋 ดูรายชื่อ จะเชื่อมกับเช็กชื่อบ้านวันนี้: ✅ มา / 🕒 มาสาย / 📝 ลา / ⬜ ยังไม่เช็ก`);
+            .setDescription(`ระบบนี้ **แยกจากเช็กชื่อปกติ**\nหัวหน้าบ้าน: ${house.leaderId ? `<@${house.leaderId}>` : 'ยังไม่ตั้ง'}\nลูกบ้าน: ${(house.memberIds || []).length} คน\nสถานะในปุ่ม 📋 ดูรายชื่อ จะเชื่อมกับเช็กชื่อบ้านวันนี้: ✅ มา / 🕒 มาสาย / 📝 ลา / ❌ ขาด / ⬜ ยังไม่เช็ก`);
           if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
           await target.send({ embeds: [embed], components: housePanelComponents(house.id), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
           sent++;
@@ -2337,46 +1979,6 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       if (sub === 'list') {
         const g = store.getGuild(i.guildId);
         return await i.reply(ep('🏠 **รายชื่อบ้าน**\n' + houseListText(g)));
-      }
-    }
-
-
-    if (i.commandName === 'profile') {
-      const g = configOf(i);
-      if (!onlyTeam(i, g) && !manager(i)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
-      const target = i.options.getUser('member') || i.user;
-      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
-      const text = profileText(g, target.id, roster);
-      if (profileLogWebhookUrl) postGenericWebhook(profileLogWebhookUrl, simpleWebhookPayload('IMT Profile Log', `👤 เปิดดูโปรไฟล์ • ${target.username}`, `ผู้เปิดดู: <@${i.user.id}>\nเป้าหมาย: <@${target.id}>`, 0x5865F2), 'profile').catch(console.error);
-      return await i.reply(ep(text));
-    }
-    if (i.commandName === 'discipline') {
-      const g = configOf(i);
-      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
-      await i.deferReply({ flags: MessageFlags.Ephemeral });
-      let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
-      const text = disciplineReportText(g, roster, store.today(), 25);
-      if (disciplineLogWebhookUrl) postGenericWebhook(disciplineLogWebhookUrl, simpleWebhookPayload('IMT Discipline Log', `🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22), 'discipline').catch(console.error);
-      return await i.editReply(longEmbed(`🏆 คะแนนวินัย • ${store.today()}`, text, 0xE67E22));
-    }
-    if (i.commandName === 'admin') {
-      if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
-      const sub = i.options.getSubcommand();
-      const g = configOf(i);
-      if (sub === 'panel') {
-        if (adminLogWebhookUrl) postGenericWebhook(adminLogWebhookUrl, simpleWebhookPayload('IMT Admin Log', '🧭 เปิด Admin Dashboard', `ผู้สร้าง: <@${i.user.id}>`, 0x34495E), 'admin').catch(console.error);
-        return await i.reply({ content: adminDashboardText(), components: adminDashboardComponents(), flags: MessageFlags.Ephemeral, allowedMentions: silent });
-      }
-      if (sub === 'backup') {
-        if (!backupLogWebhookUrl) return await i.reply(ep('ยังไม่ได้ตั้ง BACKUP_LOG_WEBHOOK_URL'));
-        await postGenericWebhook(backupLogWebhookUrl, backupPayload(i.guildId, g), 'backup');
-        return await i.reply(ep('ส่ง Backup ไปยัง backup_log แล้ว'));
-      }
-      if (sub === 'weekly') {
-        let roster = null; try { roster = await optionalRoster(i.guild, g.config); } catch {}
-        const payload = weeklyReportPayload(i.guildId, g, roster, store.today());
-        if (weeklyLogWebhookUrl) await postGenericWebhook(weeklyLogWebhookUrl, payload, 'weekly');
-        return await i.reply(ep(payload.embeds[0].description));
       }
     }
 
@@ -2416,14 +2018,10 @@ client.once(Events.ClientReady, c => {
     snapshotRosterNearMidnight().catch(console.error);
     dailyWebhookSummaries().catch(console.error);
     cleanupHistoryViews().catch(console.error);
-    reminderSchedules().catch(console.error);
-    weeklyAndBackupSchedules().catch(console.error);
   }, { timezone: 'Asia/Bangkok' });
   dailySummaries().catch(console.error);
   dailyWebhookSummaries().catch(console.error);
   ensureDailyDashboard().catch(console.error);
   cleanupHistoryViews().catch(console.error);
-  reminderSchedules().catch(console.error);
-  weeklyAndBackupSchedules().catch(console.error);
 });
 client.login(token).catch(e => { console.error('ล็อกอินบอตไม่สำเร็จ:', e.message); process.exitCode = 1; });
