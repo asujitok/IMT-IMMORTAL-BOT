@@ -17,6 +17,7 @@ const history = require('./history');
 const logoFile = path.join(__dirname, '..', 'assets', 'IMMORTAL-2.png');
 const hasLogo = fs.existsSync(logoFile);
 const token = process.env.DISCORD_TOKEN;
+const deliveryLogWebhookUrl = process.env.DELIVERY_LOG_WEBHOOK_URL || '';
 if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
   console.error('กรุณาใส่ DISCORD_TOKEN ในไฟล์ .env');
   process.exit(1);
@@ -339,6 +340,87 @@ function deliveryRequiredText(g) {
   return '📋 **ของที่ต้องส่ง**\n' + rows.map((x, idx) =>
     `${idx + 1}. ${sanitize(x.name)} — ${Number(x.requiredQty || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n').slice(0, 1900);
 }
+function deliveryLogMeta(type) {
+  return {
+    submitted: ['📦 DELIVERY LOG — ส่งของใหม่', 0xADB5BD],
+    approved: ['✅ DELIVERY LOG — รับของแล้ว', 0x2ECC71],
+    rejected: ['❌ DELIVERY LOG — ไม่รับของ', 0xE74C3C],
+    locker_imported: ['📥 DELIVERY LOG — นำเข้าตู้แก๊ง', 0x3498DB],
+    locker_skipped: ['➖ DELIVERY LOG — ไม่ดำเนินการใดๆ', 0x95A5A6],
+    item_upsert: ['🛠 DELIVERY LOG — สร้าง/แก้ไขของที่ต้องส่ง', 0x5865F2],
+    item_remove: ['🗑 DELIVERY LOG — ลบของที่ต้องส่ง', 0xE67E22],
+    role_add: ['👑 DELIVERY LOG — เพิ่มยศผู้จัดการส่งของ', 0x9B59B6],
+    role_remove: ['👑 DELIVERY LOG — ลบยศผู้จัดการส่งของ', 0xF39C12]
+  }[type] || ['📜 DELIVERY LOG', 0xADB5BD];
+}
+function deliveryLogActionText(type) {
+  return {
+    submitted: 'ส่งของใหม่', approved: 'รับของแล้ว', rejected: 'ไม่รับของ',
+    locker_imported: 'นำเข้าตู้', locker_skipped: 'ไม่ดำเนินการใดๆ',
+    item_upsert: 'สร้าง/แก้ไขของที่ต้องส่ง', item_remove: 'ลบของที่ต้องส่ง',
+    role_add: 'เพิ่มยศผู้จัดการส่งของ', role_remove: 'ลบยศผู้จัดการส่งของ'
+  }[type] || type;
+}
+function deliveryLogLine(x, idx = null) {
+  const who = x.userId ? `<@${x.userId}>` : '-';
+  const actor = x.actorId ? `<@${x.actorId}>` : (x.reviewerId ? `<@${x.reviewerId}>` : '-');
+  const qty = Number.isSafeInteger(x.quantity) ? `${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit || '')}`.trim() : '-';
+  const item = sanitize(x.itemName || '-');
+  const locker = x.lockerAction === 'imported'
+    ? ` • ตู้ ${Number(x.beforeQty ?? 0).toLocaleString('en-US')} → ${Number(x.afterQty ?? 0).toLocaleString('en-US')}`
+    : x.lockerAction === 'skipped' ? ' • ไม่เปลี่ยนตู้' : '';
+  return `${idx === null ? '' : idx + '. '}**${deliveryLogActionText(x.type)}** — ${item} ${qty}\nผู้ส่ง: ${who} • ผู้ดำเนินการ: ${actor}${locker}\nรหัส: ${x.id}${x.deliveryId ? ` • รายการ: ${x.deliveryId}` : ''}`;
+}
+function deliveryHistoryText(g, filters = {}) {
+  const rows = store.deliveryHistory(guildIdFromGuild(g), filters);
+  if (!rows.length) return '📜 **ประวัติส่งของ**\nยังไม่มีประวัติที่ตรงกับเงื่อนไข';
+  return '📜 **ประวัติส่งของล่าสุด**\n' + rows.map((x, idx) => deliveryLogLine(x, idx + 1)).join('\n\n').slice(0, 1900);
+}
+function guildIdFromGuild(g) {
+  const db = store.load();
+  for (const [id, value] of Object.entries(db.guilds || {})) if (value === g) return id;
+  // getGuild() คืน object คนละ reference จาก load() ใหม่ จึงใช้ fallback จาก config ไม่ได้; caller ควรใช้ deliveryHistoryTextForGuild
+  return null;
+}
+function deliveryHistoryTextForGuild(guildId, filters = {}) {
+  const rows = store.deliveryHistory(guildId, filters);
+  if (!rows.length) return '📜 **ประวัติส่งของ**\nยังไม่มีประวัติที่ตรงกับเงื่อนไข';
+  return '📜 **ประวัติส่งของล่าสุด**\n' + rows.map((x, idx) => deliveryLogLine(x, idx + 1)).join('\n\n').slice(0, 1900);
+}
+function deliveryLogWebhookPayload(log) {
+  const [title, color] = deliveryLogMeta(log.type);
+  const fields = [
+    log.userId ? { name: 'ผู้ส่ง', value: `<@${log.userId}>`, inline: true } : null,
+    log.actorId ? { name: 'ผู้ดำเนินการ', value: `<@${log.actorId}>`, inline: true } : null,
+    log.reviewerId && !log.actorId ? { name: 'ผู้ตรวจรับ', value: `<@${log.reviewerId}>`, inline: true } : null,
+    log.itemName ? { name: 'รายการ', value: sanitize(log.itemName), inline: true } : null,
+    Number.isSafeInteger(log.quantity) ? { name: 'จำนวน', value: `${log.quantity.toLocaleString('en-US')} ${sanitize(log.unit || '')}`.trim(), inline: true } : null,
+    log.status ? { name: 'สถานะ', value: sanitize(log.status), inline: true } : null,
+    log.lockerAction ? { name: 'ผลลัพธ์ตู้แก๊ง', value: log.lockerAction === 'imported' ? `นำเข้าตู้ (${Number(log.beforeQty ?? 0).toLocaleString('en-US')} → ${Number(log.afterQty ?? 0).toLocaleString('en-US')})` : 'ไม่ดำเนินการใดๆ', inline: false } : null,
+    log.note ? { name: 'หมายเหตุ', value: sanitize(log.note), inline: false } : null,
+    { name: 'รหัสประวัติ', value: log.id, inline: true },
+    log.deliveryId ? { name: 'รหัสรายการ', value: log.deliveryId, inline: true } : null
+  ].filter(Boolean);
+  return {
+    username: 'IMT Delivery Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{ title, color, fields, footer: { text: '[IMT] IMMORTAL • Delivery System • เวลาไทย' }, timestamp: log.at }]
+  };
+}
+async function postDeliveryWebhook(log) {
+  if (!deliveryLogWebhookUrl) return false;
+  const response = await fetch(deliveryLogWebhookUrl, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(deliveryLogWebhookPayload(log))
+  });
+  if (!response.ok) throw new Error(`Webhook log ส่งของล้มเหลว: ${response.status}`);
+  return true;
+}
+async function recordDeliveryLog(guildId, type, data = {}) {
+  const log = store.deliveryLogAdd(guildId, type, data);
+  postDeliveryWebhook(log).catch(e => console.error('ส่ง delivery webhook log ไม่สำเร็จ:', e.message));
+  return log;
+}
 function deliveryItemModal() {
   return new ModalBuilder().setTitle('สร้าง/แก้ไขของที่ต้องส่ง').setCustomId('delivery:item-modal')
     .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name')
@@ -416,6 +498,7 @@ async function confirmDelivery(i, id) {
   try {
     message = await channel.send({ content: receiptText(row), components: deliveryReviewComponents(row), allowedMentions: silent });
     delivery.attachMessage(i.guildId, p.date, row.id, channel.id, message.id);
+    await recordDeliveryLog(i.guildId, 'submitted', { date: p.date, userId: i.user.id, deliveryId: row.id, itemName: row.name, quantity: row.quantity, unit: row.unit, status: 'pending' });
   } catch (e) {
     delivery.removeUnposted(i.guildId, p.date, row.id);
     throw e;
@@ -433,6 +516,10 @@ async function reviewDeliveryFromButton(i, id, outcome) {
   const match = delivery.findById(i.guildId, id);
   if (!match) throw new Error('ไม่พบรายการส่งของ');
   const result = delivery.review(i.guildId, match.date, match.entry.id, outcome, i.user.id);
+  if (!result.unchanged) await recordDeliveryLog(i.guildId, outcome === 'approved' ? 'approved' : 'rejected', {
+    date: match.date, userId: result.entry.userId, actorId: i.user.id, reviewerId: i.user.id, deliveryId: result.entry.id,
+    itemName: result.entry.name, quantity: result.entry.quantity, unit: result.entry.unit, status: result.entry.status
+  });
   await i.message.edit({ content: receiptText(result.entry), components: deliveryReviewComponents(result.entry), allowedMentions: silent });
   await refreshDeliveryDashboard(i.guild, match.date);
 }
@@ -442,8 +529,15 @@ async function deliveryLockerAction(i, id, action) {
   await i.deferUpdate();
   const match = delivery.findById(i.guildId, id);
   if (!match) throw new Error('ไม่พบรายการส่งของ');
-  if (action === 'imported') store.lockerIncrease(i.guildId, match.entry.name, match.entry.quantity, match.entry.unit || 'ชิ้น');
-  const entry = delivery.markLockerAction(i.guildId, match.date, match.entry.id, action, i.user.id);
+  const marked = delivery.markLockerAction(i.guildId, match.date, match.entry.id, action, i.user.id);
+  let lockerChange = null;
+  if (!marked.unchanged && action === 'imported') lockerChange = store.lockerIncrease(i.guildId, marked.entry.name, marked.entry.quantity, marked.entry.unit || 'ชิ้น');
+  const entry = marked.entry;
+  if (!marked.unchanged) await recordDeliveryLog(i.guildId, action === 'imported' ? 'locker_imported' : 'locker_skipped', {
+    date: match.date, userId: entry.userId, actorId: i.user.id, deliveryId: entry.id, itemName: entry.name,
+    quantity: entry.quantity, unit: entry.unit, status: entry.status, lockerAction: action,
+    beforeQty: lockerChange?.beforeQty ?? null, afterQty: lockerChange?.afterQty ?? null
+  });
   await i.message.edit({ content: receiptText(entry), components: deliveryReviewComponents(entry), allowedMentions: silent });
   await refreshDeliveryDashboard(i.guild, match.date);
 }
@@ -573,6 +667,11 @@ client.on(Events.InteractionCreate, async i => {
         if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         return await i.reply(ep(deliveryRequiredText(g)));
       }
+      if (i.customId === 'delivery:history') {
+        const g = configOf(i);
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        return await i.reply(ep(deliveryHistoryTextForGuild(i.guildId, { limit: 10 })));
+      }
       if (i.customId === 'delivery:pending') {
         const g = configOf(i);
         requireDeliveryManager(i, g);
@@ -640,6 +739,7 @@ client.on(Events.InteractionCreate, async i => {
       const raw = i.fields.getTextInputValue('quantity').trim();
       if (!/^\d{1,13}$/.test(raw)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม 0–1,000,000,000,000');
       const result = store.deliveryItemUpsert(i.guildId, i.fields.getTextInputValue('name'), Number(raw), i.fields.getTextInputValue('unit') || 'ชิ้น');
+      await recordDeliveryLog(i.guildId, 'item_upsert', { actorId: i.user.id, itemName: result.entry.name, quantity: result.entry.requiredQty, unit: result.entry.unit, note: result.created ? 'created' : 'updated' });
       await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังแก้ของที่ต้องส่ง:', e.message));
       return await i.reply(ep(`${result.created ? 'เพิ่ม' : 'แก้ไข'}ของที่ต้องส่งแล้ว: ${sanitize(result.entry.name)} ${Number(result.entry.requiredQty).toLocaleString('en-US')} ${sanitize(result.entry.unit)}`));
     }
@@ -725,11 +825,13 @@ client.on(Events.InteractionCreate, async i => {
         if (sub === 'add') {
           const role = i.options.getRole('role', true);
           const roles = store.deliveryRoleAdd(i.guildId, role.id);
+          await recordDeliveryLog(i.guildId, 'role_add', { actorId: i.user.id, note: role.name });
           return await i.reply(ep(`เพิ่มยศผู้จัดการส่งของแล้ว: ${role.name}\nตอนนี้มี ${roles.length} ยศ`));
         }
         if (sub === 'remove') {
           const role = i.options.getRole('role', true);
           const roles = store.deliveryRoleRemove(i.guildId, role.id);
+          await recordDeliveryLog(i.guildId, 'role_remove', { actorId: i.user.id, note: role.name });
           return await i.reply(ep(`ลบยศผู้จัดการส่งของแล้ว: ${role.name}\nตอนนี้เหลือ ${roles.length} ยศ`));
         }
         const roles = g.deliveryManagerRoleIds || [];
@@ -739,11 +841,13 @@ client.on(Events.InteractionCreate, async i => {
         requireDeliveryManager(i, g);
         if (sub === 'add') {
           const result = store.deliveryItemUpsert(i.guildId, i.options.getString('name', true), i.options.getInteger('quantity', true), i.options.getString('unit') || 'ชิ้น');
+          await recordDeliveryLog(i.guildId, 'item_upsert', { actorId: i.user.id, itemName: result.entry.name, quantity: result.entry.requiredQty, unit: result.entry.unit, note: result.created ? 'created' : 'updated' });
           await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังแก้ของที่ต้องส่ง:', e.message));
           return await i.reply(ep(`${result.created ? 'เพิ่ม' : 'แก้ไข'}ของที่ต้องส่งแล้ว: ${sanitize(result.entry.name)} ${Number(result.entry.requiredQty).toLocaleString('en-US')} ${sanitize(result.entry.unit)}`));
         }
         if (sub === 'remove') {
           const removed = store.deliveryItemRemove(i.guildId, i.options.getString('name', true));
+          await recordDeliveryLog(i.guildId, 'item_remove', { actorId: i.user.id, itemName: removed.name, quantity: removed.requiredQty, unit: removed.unit });
           await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังลบของที่ต้องส่ง:', e.message));
           return await i.reply(ep(`ลบของที่ต้องส่งแล้ว: ${sanitize(removed.name)}`));
         }
@@ -756,14 +860,14 @@ client.on(Events.InteractionCreate, async i => {
         const channel = await i.guild.channels.fetch(g.config.deliveryChannelId);
         if (!channel?.isTextBased()) throw new Error('บอตไม่สามารถเข้าห้องส่งของได้');
         const embed = new EmbedBuilder().setTitle('📦 [IMT] IMMORTAL • ห้องส่งของ')
-          .setDescription('สมาชิกกด **ส่งของ** แล้วกรอกชื่อของและจำนวน\nทุกคนตรวจสอบรายการของที่ต้องส่งได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งและกด **✅ ยืนยันรับของ** ได้\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
+          .setDescription('สมาชิกกด **ส่งของ** แล้วกรอกชื่อของและจำนวน\nทุกคนตรวจสอบรายการของที่ต้องส่งและประวัติส่งของล่าสุดได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งได้\nเมื่อมีสมาชิกส่งของแล้ว จะมีปุ่ม **✅ ยืนยันรับของ** และ **❌ ไม่รับของ** ใต้รายการนั้นโดยตรง\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
           .setColor(0xADB5BD);
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('delivery:items-manage').setLabel('🛠 สร้าง/แก้ไขของที่ต้องส่ง').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('delivery:open').setLabel('📦 ส่งของ').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('delivery:pending').setLabel('✅ ยืนยัน').setStyle(ButtonStyle.Danger)
+          new ButtonBuilder().setCustomId('delivery:history').setLabel('📜 ประวัติส่งของ').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('delivery:open').setLabel('📦 ส่งของ').setStyle(ButtonStyle.Success)
         );
         await channel.send({ embeds: [embed], components: [row], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
         await refreshDeliveryDashboard(i.guild);
@@ -775,6 +879,16 @@ client.on(Events.InteractionCreate, async i => {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
         const roster = await optionalRoster(i.guild, g.config);
         return await i.editReply({ content: delivery.summary(g, store.today(), roster, g.config.time || '20:00').slice(0, 1900), allowedMentions: silent });
+      }
+      if (sub === 'history') {
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        const member = i.options.getUser('member');
+        return await i.reply(ep(deliveryHistoryTextForGuild(i.guildId, {
+          userId: member?.id || null,
+          itemName: i.options.getString('item') || null,
+          date: i.options.getString('date') || null,
+          limit: i.options.getInteger('limit') || 10
+        })));
       }
     }
     if (i.commandName === 'locker') {
