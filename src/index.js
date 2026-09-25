@@ -323,20 +323,35 @@ function lockerManager(i, g) {
 function requireLockerManager(i, g) {
   if (!lockerManager(i, g)) throw new Error('คุณไม่มียศสำหรับแก้ไขตู้แก๊ง');
 }
+function lockerMoneyBreakdown(g) {
+  const result = { green: 0, red: 0 };
+  for (const x of (g?.locker || [])) {
+    const name = displayItemName(x.name);
+    const qty = Number(x.quantity || 0);
+    if (!Number.isFinite(qty)) continue;
+    if (name === 'เงินเขียว') result.green += qty;
+    else if (name === 'เงินแดง') result.red += qty;
+  }
+  return result;
+}
+function lockerMoneyText(g) {
+  const money = lockerMoneyBreakdown(g);
+  return `🟩เงินเขียว ${money.green.toLocaleString('en-US')} บาท\n🟥เงินแดง — **${money.red.toLocaleString('en-US')}** บาท`;
+}
 function lockerSummaryText(g) {
   const summary = store.lockerSummary(g);
   const rows = summary.rows;
   const lines = rows.length ? rows.map((x, idx) => `${idx + 1}. ${itemLabel(x.name)} — ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`) : ['ยังไม่มีของในตู้'];
   return `📦 **[IMT] IMMORTAL — ตู้แก๊ง**\n\n` +
     `📋 จำนวนรายการทั้งหมด: **${summary.totalItems.toLocaleString('en-US')} รายการ**\n` +
-    `💰 มูลค่าเงินรวม: **${summary.moneyTotal.toLocaleString('en-US')} บาท**\n\n` + lines.join('\n');
+    `${lockerMoneyText(g)}\n\n` + lines.join('\n');
 }
 function lockerEmbed(g) {
   const summary = store.lockerSummary(g);
   const list = summary.rows.length ? summary.rows.map((x, idx) => `${idx + 1}. ${itemLabel(x.name)} — **${Number(x.quantity || 0).toLocaleString('en-US')}** ${sanitize(x.unit || 'ชิ้น')}`).join('\n') : 'ยังไม่มีของในตู้';
   return new EmbedBuilder()
     .setTitle('📦 [IMT] IMMORTAL • Dashboard ตู้แก๊ง')
-    .setDescription(`📋 จำนวนรายการทั้งหมด: **${summary.totalItems.toLocaleString('en-US')} รายการ**\n💰 มูลค่าเงินรวม: **${summary.moneyTotal.toLocaleString('en-US')} บาท**`)
+    .setDescription(`📋 จำนวนรายการทั้งหมด: **${summary.totalItems.toLocaleString('en-US')} รายการ**\n${lockerMoneyText(g)}`)
     .addFields({ name: 'ของในตู้', value: list.slice(0, 1000), inline: false })
     .setColor(0x2F3136)
     .setFooter({ text: 'ตู้แก๊งแยกจากระบบส่งของ • สมาชิกดูได้ ผู้จัดการตู้เท่านั้นที่แก้ไขได้' })
@@ -553,6 +568,57 @@ async function recordDeliveryLog(guildId, type, data = {}) {
   const log = store.deliveryLogAdd(guildId, type, data);
   postDeliveryWebhook(log).catch(e => console.error(`ส่ง ${isVaultLogType(type) ? 'vault' : 'delivery'} webhook log ไม่สำเร็จ:`, e.message));
   return log;
+}
+
+async function postSummaryWebhook(url, payload, label) {
+  if (!url) return false;
+  const response = await fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`${label} summary webhook ล้มเหลว: ${response.status}`);
+  return true;
+}
+function summaryWebhookPayload(title, description, color, footerKind) {
+  return {
+    username: footerKind === 'vault' ? 'IMT Vault Log' : 'IMT Delivery Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title, color, description: String(description || '-').slice(0, 3900),
+      footer: { text: `[IMT] IMMORTAL • ${footerKind === 'vault' ? 'Vault Summary' : 'Delivery Summary'} • เวลาไทย` },
+      timestamp: new Date().toISOString()
+    }]
+  };
+}
+async function dailyWebhookSummaries() {
+  if (store.timeBangkok() !== '23:59') return;
+  const date = store.today();
+  for (const id of store.getGuildIds()) {
+    const g = store.getGuild(id);
+    if (!g) continue;
+    const guild = client.guilds.cache.get(id);
+    let roster = null;
+    if (guild && g.config) {
+      try { roster = await optionalRoster(guild, g.config); }
+      catch { roster = null; }
+    }
+    if (deliveryLogWebhookUrl && !g.sent?.[date]?.deliveryWebhookSummary) {
+      const text = delivery.summary(g, date, roster, g.config?.time || '20:00', '23:59') +
+        `\n\n${deliveryRequiredText(g)}`;
+      try {
+        await postSummaryWebhook(deliveryLogWebhookUrl,
+          summaryWebhookPayload(`📦 สรุปส่งของประจำวัน • ${date}`, text, 0xADB5BD, 'delivery'), 'delivery');
+        store.markSent(id, date, 'deliveryWebhookSummary');
+      } catch (e) { console.error('ส่งสรุป webhook ส่งของ 23:59 ไม่สำเร็จ:', e.message); }
+    }
+    if (vaultLogWebhookUrl && !g.sent?.[date]?.vaultWebhookSummary) {
+      try {
+        await postSummaryWebhook(vaultLogWebhookUrl,
+          summaryWebhookPayload(`📦 สรุปตู้แก๊งประจำวัน • ${date}`, lockerSummaryText(g), 0x3498DB, 'vault'), 'vault');
+        store.markSent(id, date, 'vaultWebhookSummary');
+      } catch (e) { console.error('ส่งสรุป webhook ตู้แก๊ง 23:59 ไม่สำเร็จ:', e.message); }
+    }
+  }
 }
 function deliveryItemModal() {
   return new ModalBuilder().setTitle('สร้าง/แก้ไขของที่ต้องส่ง').setCustomId('delivery:item-modal')
@@ -1240,6 +1306,7 @@ client.once(Events.ClientReady, c => {
     dailySummaries().catch(console.error);
     ensureDailyDashboard().catch(console.error);
     snapshotRosterNearMidnight().catch(console.error);
+    dailyWebhookSummaries().catch(console.error);
     cleanupHistoryViews().catch(console.error);
   }, { timezone: 'Asia/Bangkok' });
   dailySummaries().catch(console.error);
