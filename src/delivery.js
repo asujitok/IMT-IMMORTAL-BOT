@@ -111,9 +111,12 @@ function markLockerAction(guildId, date, id, action, userId) {
     const entry = g.deliveries?.[date]?.find(x => x.id === id);
     if (!entry) throw new Error('ไม่พบรายการส่งของ');
     if (entry.status !== 'approved') throw new Error('ต้องรับของก่อนจึงจะเลือกนำเข้าตู้หรือไม่ดำเนินการได้');
-    if (entry.lockerAction && entry.lockerAction !== action) throw new Error('รายการนี้มีการเลือกดำเนินการหลังรับของไปแล้ว');
+    if (entry.lockerAction) {
+      if (entry.lockerAction !== action) throw new Error('รายการนี้มีการเลือกดำเนินการหลังรับของไปแล้ว');
+      return { entry, unchanged: true };
+    }
     entry.lockerAction = action; entry.lockerActionBy = userId; entry.lockerActionAt = new Date().toISOString();
-    return entry;
+    return { entry, unchanged: false };
   });
 }
 function list(g, date) { return (g.deliveries?.[date] || []).filter(x => !x.supersededBy); }
