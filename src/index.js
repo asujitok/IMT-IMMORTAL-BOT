@@ -394,11 +394,11 @@ function lockerButtons() {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('locker:check').setLabel('📋 เช็คของ').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('locker:add').setLabel('➕ เพิ่มของ').setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId('locker:add').setLabel('➕ เพิ่มจำนวน').setStyle(ButtonStyle.Success)
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('locker:remove').setLabel('➖ ลบของ').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('locker:edit').setLabel('✏️ แก้ไขของ').setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId('locker:remove').setLabel('➖ ลดจำนวน').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('locker:edit').setLabel('✏️ ตั้งจำนวน').setStyle(ButtonStyle.Primary)
     )
   ];
 }
@@ -407,14 +407,16 @@ function lockerAddModal() {
     .addComponents(
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของ').setStyle(TextInputStyle.Short).setPlaceholder('red money = เงินแดง, money = เงินเขียว').setMaxLength(80).setRequired(true)),
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่เพิ่ม').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 5').setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วย').setStyle(TextInputStyle.Short).setPlaceholder('ชิ้น / บาท').setValue('ชิ้น').setMaxLength(20).setRequired(true))
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วย').setStyle(TextInputStyle.Short).setPlaceholder('ชิ้น / บาท').setValue('ชิ้น').setMaxLength(20).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น ฝากเพิ่ม / จากส่งของ').setMaxLength(120).setRequired(false))
     );
 }
 function lockerRemoveModal() {
   return new ModalBuilder().setTitle('➖ ลบของจากตู้แก๊ง').setCustomId('locker:remove:modal')
     .addComponents(
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของ').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่ลบออก').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 2').setRequired(true))
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่ลดออก').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 2').setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น เอาไปใช้ / แจกสมาชิก').setMaxLength(120).setRequired(false))
     );
 }
 function lockerEditModal() {
@@ -423,7 +425,8 @@ function lockerEditModal() {
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อของเดิม').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('newname').setLabel('ชื่อใหม่ (เว้นว่าง = ใช้ชื่อเดิม)').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(false)),
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนใหม่').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 10').setRequired(true)),
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วยใหม่ (เว้นว่าง = ใช้หน่วยเดิม)').setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(false))
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วยใหม่ (เว้นว่าง = ใช้หน่วยเดิม)').setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น ปรับยอดตามของจริง').setMaxLength(120).setRequired(false))
     );
 }
 function parsePositiveInt(raw, max = 1000000000000) {
@@ -541,9 +544,11 @@ function deliveryLogLine(x, idx = null) {
   const actor = x.actorId ? `<@${x.actorId}>` : (x.reviewerId ? `<@${x.reviewerId}>` : '-');
   const qty = Number.isSafeInteger(x.quantity) ? `${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit || '')}`.trim() : '-';
   const item = itemLabel(x.itemName || '-');
+  const hasQtyFlow = Number.isSafeInteger(x.beforeQty) && Number.isSafeInteger(x.afterQty);
   const locker = x.lockerAction === 'imported'
     ? ` • ตู้ ${Number(x.beforeQty ?? 0).toLocaleString('en-US')} → ${Number(x.afterQty ?? 0).toLocaleString('en-US')}`
-    : x.lockerAction === 'skipped' ? ' • ไม่เปลี่ยนตู้' : '';
+    : x.lockerAction === 'skipped' ? ' • ไม่เปลี่ยนตู้'
+      : String(x.type || '').startsWith('locker_') && hasQtyFlow ? ` • ตู้ ${Number(x.beforeQty).toLocaleString('en-US')} → ${Number(x.afterQty).toLocaleString('en-US')}` : '';
   return `${idx === null ? '' : idx + '. '}**${deliveryLogActionText(x.type)}** — ${item} ${qty}\nผู้ส่ง: ${who} • ผู้ดำเนินการ: ${actor}${locker}\nรหัส: ${x.id}${x.deliveryId ? ` • รายการ: ${x.deliveryId}` : ''}`;
 }
 function deliveryHistoryText(g, filters = {}) {
@@ -576,6 +581,7 @@ function deliveryLogWebhookPayload(log) {
     Number.isSafeInteger(log.quantity) ? { name: 'จำนวน', value: `${log.quantity.toLocaleString('en-US')} ${sanitize(log.unit || '')}`.trim(), inline: true } : null,
     log.status ? { name: 'สถานะ', value: sanitize(log.status), inline: true } : null,
     log.lockerAction ? { name: 'ผลลัพธ์ตู้แก๊ง', value: log.lockerAction === 'imported' ? `นำเข้าตู้ (${Number(log.beforeQty ?? 0).toLocaleString('en-US')} → ${Number(log.afterQty ?? 0).toLocaleString('en-US')})` : 'ไม่ดำเนินการใดๆ', inline: false } : null,
+    !log.lockerAction && String(log.type || '').startsWith('locker_') && Number.isSafeInteger(log.beforeQty) && Number.isSafeInteger(log.afterQty) ? { name: 'ยอดตู้แก๊ง', value: `${Number(log.beforeQty).toLocaleString('en-US')} → ${Number(log.afterQty).toLocaleString('en-US')}`, inline: false } : null,
     log.note ? { name: 'หมายเหตุ', value: sanitize(log.note), inline: false } : null,
     { name: 'รหัสประวัติ', value: log.id, inline: true },
     log.deliveryId ? { name: 'รหัสรายการ', value: log.deliveryId, inline: true } : null
@@ -1615,21 +1621,26 @@ client.on(Events.InteractionCreate, async i => {
     if (i.isModalSubmit() && i.customId === 'locker:add:modal') {
       const g = configOf(i); requireLockerManager(i, g);
       const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const note = (i.fields.getTextInputValue('note') || '').trim();
       const x = store.lockerAdd(i.guildId, i.fields.getTextInputValue('name'), qty, i.fields.getTextInputValue('unit') || 'ชิ้น');
-      await recordDeliveryLog(i.guildId, 'locker_add', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, note: 'locker panel' });
-      return await i.reply({ ...ep(`➕ เพิ่มของแล้ว: ${itemLabel(x.name)} +${qty.toLocaleString('en-US')} ${sanitize(x.unit)}
-ยอดปัจจุบัน: ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}
+      await recordDeliveryLog(i.guildId, 'locker_add', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || (x.created ? 'สร้างรายการใหม่จาก locker panel' : 'เพิ่มจำนวนจาก locker panel') });
+      return await i.reply({ ...ep(`➕ เพิ่มจำนวนแล้ว: ${itemLabel(x.name)} +${qty.toLocaleString('en-US')} ${sanitize(x.unit)}
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}${note ? `
+หมายเหตุ: ${sanitize(note)}` : ''}
 
 ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
     }
     if (i.isModalSubmit() && i.customId === 'locker:remove:modal') {
       const g = configOf(i); requireLockerManager(i, g);
       const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const note = (i.fields.getTextInputValue('note') || '').trim();
       const x = store.lockerRemove(i.guildId, i.fields.getTextInputValue('name'), qty);
-      await recordDeliveryLog(i.guildId, 'locker_remove', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, note: x.deleted ? 'deleted' : 'decreased' });
-      const left = x.deleted ? 'ลบรายการออกแล้ว' : `คงเหลือ ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`;
-      return await i.reply({ ...ep(`➖ ลบของแล้ว: ${itemLabel(x.name)} -${qty.toLocaleString('en-US')} ${sanitize(x.unit)}
-${left}
+      await recordDeliveryLog(i.guildId, 'locker_remove', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || (x.deleted ? 'ลดยอดจนเป็น 0 และลบรายการจาก locker panel' : 'ลดจำนวนจาก locker panel') });
+      const left = x.deleted ? 'ยอดเหลือ 0 และลบรายการออกแล้ว' : `คงเหลือ ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`;
+      return await i.reply({ ...ep(`➖ ลดจำนวนแล้ว: ${itemLabel(x.name)} -${qty.toLocaleString('en-US')} ${sanitize(x.unit)}
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}
+${left}${note ? `
+หมายเหตุ: ${sanitize(note)}` : ''}
 
 ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
     }
@@ -1638,9 +1649,12 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       const qty = parseNonNegativeInt(i.fields.getTextInputValue('quantity'));
       const unit = i.fields.getTextInputValue('unit').trim() || null;
       const newName = i.fields.getTextInputValue('newname').trim() || null;
+      const note = (i.fields.getTextInputValue('note') || '').trim();
       const x = store.lockerEdit(i.guildId, i.fields.getTextInputValue('name'), qty, unit, newName);
-      await recordDeliveryLog(i.guildId, 'locker_edit', { actorId: i.user.id, itemName: x.name, quantity: x.quantity, unit: x.unit, note: 'locker panel' });
-      return await i.reply({ ...ep(`✏️ แก้ไขของแล้ว: ${itemLabel(x.name)} — ${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit)}
+      await recordDeliveryLog(i.guildId, 'locker_edit', { actorId: i.user.id, itemName: x.name, quantity: x.quantity, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || 'ตั้งจำนวนจาก locker panel' });
+      return await i.reply({ ...ep(`✏️ ตั้งจำนวนแล้ว: ${itemLabel(x.name)}
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}${note ? `
+หมายเหตุ: ${sanitize(note)}` : ''}
 
 ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
     }
@@ -1869,22 +1883,25 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         requireLockerManager(i, g);
         const x = store.lockerAdd(i.guildId, i.options.getString('name', true),
           i.options.getInteger('quantity', true), i.options.getString('unit') || 'ชิ้น');
-        await recordDeliveryLog(i.guildId, 'locker_add', { actorId: i.user.id, itemName: x.name, quantity: i.options.getInteger('quantity', true), unit: x.unit, note: 'slash command' });
-        return await i.reply(ep(`เพิ่มตู้แก๊ง: ${itemLabel(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}`));
+        await recordDeliveryLog(i.guildId, 'locker_add', { actorId: i.user.id, itemName: x.name, quantity: i.options.getInteger('quantity', true), unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: x.created ? 'สร้างรายการใหม่จาก slash command' : 'เพิ่มจำนวนจาก slash command' });
+        return await i.reply(ep(`เพิ่มจำนวนตู้แก๊ง: ${itemLabel(x.name)} +${i.options.getInteger('quantity', true).toLocaleString('en-US')} ${sanitize(x.unit)}
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`));
       }
       if (sub === 'edit') {
         requireLockerManager(i, g);
         const x = store.lockerEdit(i.guildId, i.options.getString('name', true),
           i.options.getInteger('quantity', true), i.options.getString('unit'), i.options.getString('newname'));
-        await recordDeliveryLog(i.guildId, 'locker_edit', { actorId: i.user.id, itemName: x.name, quantity: x.quantity, unit: x.unit, note: 'slash command' });
-        return await i.reply(ep(`แก้ไขตู้แก๊ง: ${itemLabel(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}`));
+        await recordDeliveryLog(i.guildId, 'locker_edit', { actorId: i.user.id, itemName: x.name, quantity: x.quantity, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: 'ตั้งจำนวนจาก slash command' });
+        return await i.reply(ep(`ตั้งจำนวนตู้แก๊ง: ${itemLabel(x.name)}
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`));
       }
       if (sub === 'remove') {
         requireLockerManager(i, g);
         const qty = i.options.getInteger('quantity');
         const x = store.lockerRemove(i.guildId, i.options.getString('name', true), qty);
-        await recordDeliveryLog(i.guildId, 'locker_remove', { actorId: i.user.id, itemName: x.name, quantity: qty || null, unit: x.unit, note: qty ? 'decreased' : 'deleted' });
-        return await i.reply(ep(`ลบรายการ ${itemLabel(x.name)} จากตู้แก๊งแล้ว${x.deleted === false ? ` คงเหลือ ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit)}` : ''}`));
+        await recordDeliveryLog(i.guildId, 'locker_remove', { actorId: i.user.id, itemName: x.name, quantity: qty || x.beforeQty || null, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: qty ? (x.deleted ? 'ลดจนหมดจาก slash command' : 'ลดจำนวนจาก slash command') : 'ลบทั้งรายการจาก slash command' });
+        return await i.reply(ep(`${qty ? 'ลดจำนวน' : 'ลบรายการ'} ${itemLabel(x.name)} จากตู้แก๊งแล้ว
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: ${Number(x.afterQty || 0).toLocaleString('en-US')} ${sanitize(x.unit)}`));
       }
       return await i.reply(ep(lockerSummaryText(store.getGuild(i.guildId))));
     }
