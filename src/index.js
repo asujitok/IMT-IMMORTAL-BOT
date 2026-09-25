@@ -402,6 +402,34 @@ function lockerButtons() {
     )
   ];
 }
+function lockerSelectMenu(g) {
+  const rows = store.lockerSummary(g).rows.slice(0, 25);
+  if (!rows.length) return [];
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('locker:select')
+    .setPlaceholder('เลือกของในตู้ เพื่อเพิ่ม / ลด / ตั้งจำนวน')
+    .addOptions(rows.map((x, idx) => ({
+      label: String(displayItemName(x.name) || '-').slice(0, 100),
+      value: String(idx),
+      description: `${Number(x.quantity || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`.slice(0, 100)
+    })));
+  return [new ActionRowBuilder().addComponents(menu)];
+}
+function lockerComponents(g) {
+  return [...lockerSelectMenu(g), ...lockerButtons()];
+}
+function lockerSelectedItem(g, indexText) {
+  const idx = Number(indexText);
+  if (!Number.isInteger(idx) || idx < 0) return null;
+  return store.lockerSummary(g).rows[idx] || null;
+}
+function lockerSelectedButtons(idx) {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`locker:selected:add:${idx}`).setLabel('➕ เพิ่มจำนวน').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`locker:selected:remove:${idx}`).setLabel('➖ ลดจำนวน').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`locker:selected:edit:${idx}`).setLabel('✏️ ตั้งจำนวน').setStyle(ButtonStyle.Primary)
+  )];
+}
 function lockerAddModal() {
   return new ModalBuilder().setTitle('➕ เพิ่มของเข้าตู้แก๊ง').setCustomId('locker:add:modal')
     .addComponents(
@@ -429,6 +457,32 @@ function lockerEditModal() {
       new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น ปรับยอดตามของจริง').setMaxLength(120).setRequired(false))
     );
 }
+
+function lockerAddSelectedModal(item, idx) {
+  return new ModalBuilder().setTitle(('➕ เพิ่ม: ' + displayItemName(item.name)).slice(0, 45)).setCustomId(`locker:selected:addmodal:${idx}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่เพิ่ม').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 5').setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วย').setStyle(TextInputStyle.Short).setValue(String(item.unit || 'ชิ้น').slice(0, 20)).setMaxLength(20).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น ฝากเพิ่ม / จากส่งของ').setMaxLength(120).setRequired(false))
+    );
+}
+function lockerRemoveSelectedModal(item, idx) {
+  return new ModalBuilder().setTitle(('➖ ลด: ' + displayItemName(item.name)).slice(0, 45)).setCustomId(`locker:selected:removemodal:${idx}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนที่ลดออก').setStyle(TextInputStyle.Short).setPlaceholder('เช่น 2').setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น เอาไปใช้ / แจกสมาชิก').setMaxLength(120).setRequired(false))
+    );
+}
+function lockerEditSelectedModal(item, idx) {
+  return new ModalBuilder().setTitle(('✏️ ตั้งจำนวน: ' + displayItemName(item.name)).slice(0, 45)).setCustomId(`locker:selected:editmodal:${idx}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel('จำนวนใหม่').setStyle(TextInputStyle.Short).setValue(String(Number(item.quantity || 0))).setRequired(true)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit').setLabel('หน่วยใหม่ (เว้นว่าง = ใช้หน่วยเดิม)').setStyle(TextInputStyle.Short).setValue(String(item.unit || 'ชิ้น').slice(0, 20)).setMaxLength(20).setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('newname').setLabel('ชื่อใหม่ (เว้นว่าง = ใช้ชื่อเดิม)').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('note').setLabel('หมายเหตุ (ไม่บังคับ)').setStyle(TextInputStyle.Short).setPlaceholder('เช่น ปรับยอดตามของจริง').setMaxLength(120).setRequired(false))
+    );
+}
+
 function parsePositiveInt(raw, max = 1000000000000) {
   const value = String(raw || '').trim();
   if (!/^\d{1,13}$/.test(value)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม');
@@ -1565,7 +1619,7 @@ client.on(Events.InteractionCreate, async i => {
         if (!onlyTeam(i, g) && !lockerManager(i, g)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
         const embed = lockerEmbed(store.getGuild(i.guildId));
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
-        return await i.update({ embeds: [embed], components: lockerButtons(), allowedMentions: silent });
+        return await i.update({ embeds: [embed], components: lockerComponents(store.getGuild(i.guildId)), allowedMentions: silent });
       }
       if (i.customId === 'locker:add') {
         const g = configOf(i); requireLockerManager(i, g);
@@ -1579,6 +1633,27 @@ client.on(Events.InteractionCreate, async i => {
         const g = configOf(i); requireLockerManager(i, g);
         return await i.showModal(lockerEditModal());
       }
+      if (i.customId.startsWith('locker:selected:add:')) {
+        const g = configOf(i); requireLockerManager(i, g);
+        const idx = i.customId.substring('locker:selected:add:'.length);
+        const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+        if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณากด 📋 เช็คของ หรือสร้าง panel ใหม่');
+        return await i.showModal(lockerAddSelectedModal(item, idx));
+      }
+      if (i.customId.startsWith('locker:selected:remove:')) {
+        const g = configOf(i); requireLockerManager(i, g);
+        const idx = i.customId.substring('locker:selected:remove:'.length);
+        const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+        if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณากด 📋 เช็คของ หรือสร้าง panel ใหม่');
+        return await i.showModal(lockerRemoveSelectedModal(item, idx));
+      }
+      if (i.customId.startsWith('locker:selected:edit:')) {
+        const g = configOf(i); requireLockerManager(i, g);
+        const idx = i.customId.substring('locker:selected:edit:'.length);
+        const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+        if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณากด 📋 เช็คของ หรือสร้าง panel ใหม่');
+        return await i.showModal(lockerEditSelectedModal(item, idx));
+      }
       if (i.customId === 'inventory:open') {
         const g = configOf(i);
         if (!onlyTeam(i, g)) throw new Error('คุณยังไม่มีบทบาทสมาชิกทีมที่กำหนด');
@@ -1590,6 +1665,18 @@ client.on(Events.InteractionCreate, async i => {
         return await i.reply({ ...ep(g.items.length > 25 ? 'แสดง 25 รายการแรก รายการอื่นใช้ /checkitem' : 'เลือกของที่ต้องตรวจ'),
           components: [new ActionRowBuilder().addComponents(select)] });
       }
+    }
+    if (i.isStringSelectMenu() && i.customId === 'locker:select') {
+      const g = configOf(i);
+      if (!onlyTeam(i, g) && !lockerManager(i, g)) throw new Error('เฉพาะสมาชิกแก๊งที่กำหนดเท่านั้น');
+      const idx = i.values[0];
+      const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+      if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณากด 📋 เช็คของ หรือสร้าง panel ใหม่');
+      const text = `📦 เลือกรายการ: **${itemLabel(item.name)}**
+ยอดปัจจุบัน: **${Number(item.quantity || 0).toLocaleString('en-US')}** ${sanitize(item.unit || 'ชิ้น')}
+
+เลือกการทำรายการด้านล่าง`;
+      return await i.reply({ content: text, components: lockerManager(i, g) ? lockerSelectedButtons(idx) : [], flags: MessageFlags.Ephemeral, allowedMentions: silent });
     }
     if (i.isStringSelectMenu() && i.customId === 'inventory:select') {
       const g = configOf(i);
@@ -1617,6 +1704,51 @@ client.on(Events.InteractionCreate, async i => {
       await recordDeliveryLog(i.guildId, 'item_upsert', { actorId: i.user.id, itemName: result.entry.name, quantity: result.entry.requiredQty, unit: result.entry.unit, note: result.created ? 'created' : 'updated' });
       await refreshDeliveryDashboard(i.guild).catch(e => console.error('รีเฟรชรายงานส่งของหลังแก้ของที่ต้องส่ง:', e.message));
       return await i.reply(ep(`${result.created ? 'เพิ่ม' : 'แก้ไข'}ของที่ต้องส่งแล้ว: ${itemLabel(result.entry.name)} ${Number(result.entry.requiredQty).toLocaleString('en-US')} ${sanitize(result.entry.unit)}`));
+    }
+    if (i.isModalSubmit() && i.customId.startsWith('locker:selected:addmodal:')) {
+      const g = configOf(i); requireLockerManager(i, g);
+      const idx = i.customId.substring('locker:selected:addmodal:'.length);
+      const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+      if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณาเลือกใหม่');
+      const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const unit = i.fields.getTextInputValue('unit') || item.unit || 'ชิ้น';
+      const note = i.fields.getTextInputValue('note')?.trim();
+      const x = store.lockerAdd(i.guildId, item.name, qty, unit);
+      await recordDeliveryLog(i.guildId, 'locker_add', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || 'เพิ่มจำนวนจาก dropdown locker panel' });
+      await i.reply({ ...ep(`➕ เพิ่มของเข้าตู้แล้ว
+รายการ: **${itemLabel(x.name)}**
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: **${Number(x.afterQty || 0).toLocaleString('en-US')}** ${sanitize(x.unit || 'ชิ้น')}`) });
+      return;
+    }
+    if (i.isModalSubmit() && i.customId.startsWith('locker:selected:removemodal:')) {
+      const g = configOf(i); requireLockerManager(i, g);
+      const idx = i.customId.substring('locker:selected:removemodal:'.length);
+      const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+      if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณาเลือกใหม่');
+      const qty = parsePositiveInt(i.fields.getTextInputValue('quantity'));
+      const note = i.fields.getTextInputValue('note')?.trim();
+      const x = store.lockerRemove(i.guildId, item.name, qty);
+      await recordDeliveryLog(i.guildId, 'locker_remove', { actorId: i.user.id, itemName: x.name, quantity: qty, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || (x.deleted ? 'ลดยอดจนเป็น 0 และลบรายการจาก dropdown locker panel' : 'ลดจำนวนจาก dropdown locker panel') });
+      await i.reply({ ...ep(`➖ ลดของในตู้แล้ว
+รายการ: **${itemLabel(x.name)}**
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: **${Number(x.afterQty || 0).toLocaleString('en-US')}** ${sanitize(x.unit || 'ชิ้น')}`) });
+      return;
+    }
+    if (i.isModalSubmit() && i.customId.startsWith('locker:selected:editmodal:')) {
+      const g = configOf(i); requireLockerManager(i, g);
+      const idx = i.customId.substring('locker:selected:editmodal:'.length);
+      const item = lockerSelectedItem(store.getGuild(i.guildId), idx);
+      if (!item) throw new Error('ไม่พบรายการนี้ในตู้แล้ว กรุณาเลือกใหม่');
+      const qty = parseNonNegativeInt(i.fields.getTextInputValue('quantity'));
+      const unit = i.fields.getTextInputValue('unit') || item.unit || 'ชิ้น';
+      const newName = i.fields.getTextInputValue('newname')?.trim();
+      const note = i.fields.getTextInputValue('note')?.trim();
+      const x = store.lockerEdit(i.guildId, item.name, qty, unit, newName);
+      await recordDeliveryLog(i.guildId, 'locker_edit', { actorId: i.user.id, itemName: x.name, quantity: x.quantity, unit: x.unit, beforeQty: x.beforeQty, afterQty: x.afterQty, note: note || 'ตั้งจำนวนจาก dropdown locker panel' });
+      await i.reply({ ...ep(`✏️ ตั้งจำนวนตู้แก๊งแล้ว
+รายการ: **${itemLabel(x.name)}**
+ยอดเดิม: ${Number(x.beforeQty || 0).toLocaleString('en-US')} → ยอดใหม่: **${Number(x.afterQty || 0).toLocaleString('en-US')}** ${sanitize(x.unit || 'ชิ้น')}`) });
+      return;
     }
     if (i.isModalSubmit() && i.customId === 'locker:add:modal') {
       const g = configOf(i); requireLockerManager(i, g);
@@ -1876,7 +2008,7 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         if (!manager(i)) throw new Error('เฉพาะผู้ดูแลเซิร์ฟเวอร์');
         const embed = lockerEmbed(g);
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
-        await i.channel.send({ embeds: [embed], components: lockerButtons(), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+        await i.channel.send({ embeds: [embed], components: lockerComponents(store.getGuild(i.guildId)), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
         return await i.reply(ep('สร้าง Dashboard ตู้แก๊งแล้ว'));
       }
       if (sub === 'add') {
