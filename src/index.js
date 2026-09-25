@@ -698,7 +698,14 @@ function attendanceAdminEditWebhookPayload({ guildId, targetId, actorId, date, t
 
 
 function houseStatusLabel(status) {
-  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || sanitize(status || '-');
+  return ({ present: '✅ มา', late: '🕒 มาสาย', leave: '📝 ลา' })[status] || '⬜ ยังไม่เช็ก';
+}
+function houseRecordLine(record) {
+  if (!record) return '⬜ ยังไม่เช็ก';
+  const time = record.time || (record.at ? String(record.at).slice(11, 16) : '');
+  const reason = record.reason ? ` • ${sanitize(record.reason).slice(0, 80)}` : '';
+  const actor = record.actorId ? ` • โดย <@${record.actorId}>` : '';
+  return `${houseStatusLabel(record.status)}${time ? ` • เวลา ${time}` : ''}${reason}${actor}`;
 }
 function canManageHouse(i, house) {
   return manager(i) || house?.leaderId === i.user.id;
@@ -738,50 +745,81 @@ async function houseMemberSelectPayload(i, house, page = 0) {
   }
   return { ...ep(`🏠 **${sanitize(house.name)}**\nเลือกสมาชิกที่ต้องการเช็กชื่อแทน\nหน้า ${page + 1}/${totalPages} • แสดง ${start + 1}-${start + pageMembers.length} จาก ${members.length} คน`), components };
 }
-function housePanelComponents() {
+function housePanelComponents(houseId = null) {
+  const suffix = houseId ? `:${houseId}` : '';
   return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('house:open').setLabel('🏠 เช็กชื่อลูกบ้าน').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('house:list-open:0').setLabel('📋 ดูรายชื่อ').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('house:summary').setLabel('📊 สรุปบ้านวันนี้').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('house:history').setLabel('📜 ประวัติเช็กชื่อบ้าน').setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(`house:open${suffix}`).setLabel('🏠 เช็กชื่อลูกบ้าน').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(houseId ? `house:list-open:${houseId}:0` : 'house:list-open:all:0').setLabel('📋 ดูรายชื่อ').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`house:summary${suffix}`).setLabel('📊 สรุปบ้านวันนี้').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`house:history${suffix}`).setLabel('📜 ประวัติเช็กชื่อบ้าน').setStyle(ButtonStyle.Secondary)
   )];
 }
-function houseDirectoryRows(g) {
+function houseDirectoryRows(g, houseId = null) {
   const rows = [];
-  for (const h of g?.houses || []) {
+  const houses = (g?.houses || []).filter(h => !houseId || h.id === houseId);
+  const day = g?.houseAttendance?.[store.today()] || {};
+  for (const h of houses) {
     const memberIds = h.memberIds || [];
     if (!memberIds.length) {
-      rows.push({ house: h, userId: null });
+      rows.push({ house: h, userId: null, record: null });
     } else {
-      for (const userId of memberIds) rows.push({ house: h, userId });
+      for (const userId of memberIds) rows.push({ house: h, userId, record: day?.[h.id]?.[userId] || null });
     }
   }
   return rows;
 }
-function houseDirectoryPayload(g, page = 0) {
-  const rows = houseDirectoryRows(g);
+function houseDirectoryPayload(g, page = 0, houseId = null) {
+  const selectedHouse = houseId ? (g?.houses || []).find(h => h.id === houseId) : null;
+  const rows = houseDirectoryRows(g, houseId);
+  if (houseId && !selectedHouse) return { ...ep('ไม่พบบ้านนี้'), components: [] };
   if (!rows.length) return { ...ep('📋 ยังไม่มีรายชื่อบ้าน ใช้ `/house add` และ `/house member add` ก่อน'), components: [] };
   const totalPages = Math.max(1, Math.ceil(rows.length / HOUSE_DIRECTORY_PAGE_SIZE));
   page = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
   const start = page * HOUSE_DIRECTORY_PAGE_SIZE;
   const chunk = rows.slice(start, start + HOUSE_DIRECTORY_PAGE_SIZE);
-  const lines = [`📋 **รายชื่อลูกบ้านทั้งหมด**`, `หน้า ${page + 1}/${totalPages} • แสดง ${start + 1}-${start + chunk.length} จาก ${rows.length} รายการ`, ''];
+
+  const counts = { present: 0, late: 0, leave: 0, missing: 0 };
+  for (const row of rows) {
+    const st = row.record?.status;
+    if (st === 'present') counts.present++;
+    else if (st === 'late') counts.late++;
+    else if (st === 'leave') counts.leave++;
+    else counts.missing++;
+  }
+
+  const lines = [];
   let lastHouseId = null;
   for (const [idx, row] of chunk.entries()) {
-    if (row.house.id !== lastHouseId) {
-      lines.push(`🏠 **${sanitize(row.house.name)}**${row.house.leaderId ? ` — หัวหน้า <@${row.house.leaderId}>` : ''}`);
+    if (!houseId && row.house.id !== lastHouseId) {
+      lines.push(`\n🏠 **${sanitize(row.house.name)}**${row.house.leaderId ? ` — หัวหน้า <@${row.house.leaderId}>` : ''}`);
       lastHouseId = row.house.id;
     }
-    lines.push(row.userId ? `${start + idx + 1}. <@${row.userId}>` : `${start + idx + 1}. ยังไม่มีลูกบ้าน`);
+    if (!row.userId) lines.push(`**${start + idx + 1}.** ยังไม่มีลูกบ้าน`);
+    else {
+      lines.push(`**${start + idx + 1}.** <@${row.userId}>`);
+      lines.push(`└ ${houseRecordLine(row.record)}`);
+    }
   }
-  const components = [];
-  if (totalPages > 1) {
-    components.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`house:list:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
-      new ButtonBuilder().setCustomId(`house:list:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
-    ));
-  }
-  return { ...ep(lines.join('\n').slice(0, 1900)), components };
+
+  const title = selectedHouse ? `📋 รายชื่อลูกบ้าน • ${sanitize(selectedHouse.name)}` : '📋 รายชื่อลูกบ้านทั้งหมด';
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(lines.join('\n').trim().slice(0, 3900))
+    .addFields(
+      { name: 'วันที่', value: store.today(), inline: true },
+      { name: 'หน้า', value: `${page + 1}/${totalPages}`, inline: true },
+      { name: 'จำนวนรายชื่อ', value: `${rows.filter(x => x.userId).length} คน`, inline: true },
+      { name: 'สรุปสถานะ', value: `✅ มา ${counts.present} • 🕒 มาสาย ${counts.late} • 📝 ลา ${counts.leave} • ⬜ ยังไม่เช็ก ${counts.missing}`, inline: false }
+    )
+    .setFooter({ text: selectedHouse ? 'รายชื่อนี้แยกตามบ้าน และเชื่อมกับสถานะเช็กชื่อบ้านวันนี้' : 'รายชื่อนี้รวมทุกบ้านและเชื่อมกับสถานะเช็กชื่อบ้านวันนี้' });
+
+  const target = houseId || 'all';
+  const components = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`house:list:${target}:${Math.max(0, page - 1)}`).setLabel('◀️ ก่อนหน้า').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
+    new ButtonBuilder().setCustomId(`house:list:${target}:${page}`).setLabel('🔄 รีเฟรช').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`house:list:${target}:${Math.min(totalPages - 1, page + 1)}`).setLabel('ถัดไป ▶️').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1)
+  )];
+  return { embeds: [embed], components, flags: MessageFlags.Ephemeral, allowedMentions: silent };
 }
 
 const ATTENDANCE_DIRECTORY_PAGE_SIZE = 10;
@@ -879,7 +917,7 @@ function houseSummaryText(g, date = store.today(), houseFilter = null) {
     lines.push(`✅ มา (${present.length}): ${mention(present)}`);
     lines.push(`🕒 มาสาย (${late.length}): ${mention(late)}`);
     lines.push(`📝 ลา (${leave.length}): ${mention(leave)}`);
-    lines.push(`❌ ยังไม่เช็ก (${missing.length}): ${mention(missing)}`);
+    lines.push(`⬜ ยังไม่เช็ก (${missing.length}): ${mention(missing)}`);
   }
   return lines.join('\n').slice(0, 3900);
 }
@@ -1283,9 +1321,16 @@ client.on(Events.InteractionCreate, async i => {
         return;
       }
 
-      if (i.customId === 'house:open') {
+      if (i.customId === 'house:open' || i.customId.startsWith('house:open:')) {
+        const parts = i.customId.split(':');
+        const fixedHouseId = parts[2] || null;
         const houses = housesForUser(i.guildId, i.user.id, manager(i));
         if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
+        if (fixedHouseId) {
+          const house = store.houseList(i.guildId).find(h => h.id === fixedHouseId);
+          if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์เช็กชื่อบ้านนี้');
+          return await i.reply(await houseMemberSelectPayload(i, house));
+        }
         if (houses.length === 1) return await i.reply(await houseMemberSelectPayload(i, houses[0]));
         const menu = new StringSelectMenuBuilder().setCustomId('house:select-house').setPlaceholder('เลือกบ้านที่ต้องการเช็กชื่อ')
           .addOptions(houses.slice(0, 25).map(h => ({ label: h.name.slice(0, 100), value: h.id, description: `${(h.memberIds || []).length} ลูกบ้าน`.slice(0, 100) })));
@@ -1298,26 +1343,42 @@ client.on(Events.InteractionCreate, async i => {
         return await i.update(await houseMemberSelectPayload(i, house, Number(page) || 0));
       }
       if (i.customId.startsWith('house:list-open:')) {
-        const page = Number(i.customId.split(':')[2]) || 0;
-        return await i.reply(houseDirectoryPayload(store.getGuild(i.guildId), page));
+        const parts = i.customId.split(':');
+        const houseId = parts[2] && parts[2] !== 'all' ? parts[2] : null;
+        const page = Number(parts[3] || 0) || 0;
+        return await i.reply(houseDirectoryPayload(store.getGuild(i.guildId), page, houseId));
       }
       if (i.customId.startsWith('house:list:')) {
-        const page = Number(i.customId.split(':')[2]) || 0;
-        return await i.update(houseDirectoryPayload(store.getGuild(i.guildId), page));
+        const parts = i.customId.split(':');
+        const houseId = parts[2] && parts[2] !== 'all' ? parts[2] : null;
+        const page = Number(parts[3] || 0) || 0;
+        const payload = houseDirectoryPayload(store.getGuild(i.guildId), page, houseId);
+        delete payload.flags;
+        return await i.update(payload);
       }
-      if (i.customId === 'house:summary') {
+      if (i.customId === 'house:summary' || i.customId.startsWith('house:summary:')) {
+        const parts = i.customId.split(':');
+        const fixedHouseId = parts[2] || null;
         const g = store.getGuild(i.guildId);
         const houses = housesForUser(i.guildId, i.user.id, manager(i));
         if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
+        if (fixedHouseId) {
+          const house = store.houseList(i.guildId).find(h => h.id === fixedHouseId);
+          if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์ดูสรุปบ้านนี้');
+          return await i.reply(ep(houseSummaryText(g, store.today(), fixedHouseId)));
+        }
         const text = manager(i) ? houseSummaryText(g, store.today()) : houses.map(h => houseSummaryText(g, store.today(), h.id)).join('\n\n');
         return await i.reply(ep(text));
       }
-      if (i.customId === 'house:history') {
+      if (i.customId === 'house:history' || i.customId.startsWith('house:history:')) {
+        const parts = i.customId.split(':');
+        const fixedHouseId = parts[2] || null;
         const g = store.getGuild(i.guildId);
         const houses = housesForUser(i.guildId, i.user.id, manager(i));
         if (!houses.length) throw new Error('คุณยังไม่ได้เป็นหัวหน้าบ้าน หรือยังไม่มีบ้านในระบบ');
-        const ids = new Set(houses.map(h => h.id));
-        const rows = (g.houseAttendanceHistory || []).filter(x => manager(i) || ids.has(x.houseId)).slice(-10).reverse();
+        const allowedIds = new Set(houses.map(h => h.id));
+        if (fixedHouseId && !manager(i) && !allowedIds.has(fixedHouseId)) throw new Error('คุณไม่มีสิทธิ์ดูประวัติบ้านนี้');
+        const rows = (g.houseAttendanceHistory || []).filter(x => fixedHouseId ? x.houseId === fixedHouseId : (manager(i) || allowedIds.has(x.houseId))).slice(-10).reverse();
         if (!rows.length) return await i.reply(ep('📜 ยังไม่มีประวัติเช็กชื่อบ้าน'));
         const text = '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + rows.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
         return await i.reply(ep(text));
@@ -1825,11 +1886,23 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         const g = configOf(i);
         const target = i.options.getChannel('channel') || await i.guild.channels.fetch(g.config.attendanceChannelId);
         if (!target?.isTextBased()) throw new Error('ห้องนี้ส่งข้อความไม่ได้');
-        const embed = new EmbedBuilder().setTitle('🏠 [IMT] IMMORTAL • เช็กชื่อตามบ้าน')
-          .setDescription('ระบบนี้ **แยกจากเช็กชื่อปกติ**\nให้หัวหน้าบ้านเช็กชื่อแทนลูกบ้านของตัวเองเท่านั้น\nปุ่ม 📋 ดูรายชื่อ กดได้ทุกคน และแบ่งหน้าเพื่อให้เห็นรายชื่อครบ\nคนที่อยู่ในบ้านแต่ยังไม่ถูกเช็ก จะขึ้นเป็น ❌ ยังไม่เช็ก ในสรุปบ้าน 23:59');
-        if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
-        await target.send({ embeds: [embed], components: housePanelComponents(), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
-        return await i.reply(ep(`ส่งแผงเช็กชื่อตามบ้านไปที่ ${target} แล้ว`));
+        const houses = store.houseList(i.guildId);
+        if (!houses.length) {
+          const embed = new EmbedBuilder().setTitle('🏠 [IMT] IMMORTAL • เช็กชื่อตามบ้าน')
+            .setDescription('ยังไม่มีบ้านในระบบ\nให้ใช้ `/house add` แล้วเพิ่มหัวหน้าบ้าน/ลูกบ้านก่อน');
+          if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
+          await target.send({ embeds: [embed], components: housePanelComponents(), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+          return await i.reply(ep(`ส่งแผงเช็กชื่อตามบ้านไปที่ ${target} แล้ว`));
+        }
+        let sent = 0;
+        for (const house of houses) {
+          const embed = new EmbedBuilder().setTitle(`🏠 [IMT] IMMORTAL • เช็กชื่อบ้าน ${sanitize(house.name)}`)
+            .setDescription(`ระบบนี้ **แยกจากเช็กชื่อปกติ**\nหัวหน้าบ้าน: ${house.leaderId ? `<@${house.leaderId}>` : 'ยังไม่ตั้ง'}\nลูกบ้าน: ${(house.memberIds || []).length} คน\nสถานะในปุ่ม 📋 ดูรายชื่อ จะเชื่อมกับเช็กชื่อบ้านวันนี้: ✅ มา / 🕒 มาสาย / 📝 ลา / ⬜ ยังไม่เช็ก`);
+          if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
+          await target.send({ embeds: [embed], components: housePanelComponents(house.id), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+          sent++;
+        }
+        return await i.reply(ep(`ส่งแผงเช็กชื่อตามบ้านแบบแยกบ้านไปที่ ${target} แล้ว (${sent} บ้าน)`));
       }
       if (sub === 'add') {
         const house = store.houseAdd(i.guildId, i.options.getString('name', true));
