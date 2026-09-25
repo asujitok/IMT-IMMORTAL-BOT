@@ -146,8 +146,15 @@ function inventory(id, date, userId, itemId, foundQty, condition, note = '') {
 }
 
 
-function normName(name) {
+function displayItemName(name) {
   const value = String(name || '').trim();
+  const key = value.toLocaleLowerCase();
+  if (key === 'red money') return 'เงินแดง';
+  if (key === 'money') return 'เงินเขียว';
+  return value;
+}
+function normName(name) {
+  const value = displayItemName(name);
   if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
   return value;
 }
@@ -225,30 +232,75 @@ function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
 
 // ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
 function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
-  name = String(name || '').trim(); unit = String(unit || '').trim();
-  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
-  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  name = normName(name); unit = normUnit(unit);
+  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
   return update(id, g => {
     g.locker ||= [];
-    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
-    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
+    const entry = g.locker.find(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (entry) {
+      entry.name = name;
+      entry.quantity = (entry.quantity || 0) + quantity;
+      entry.unit = unit || entry.unit || 'ชิ้น';
+      return entry;
+    }
+    const created = { id: randomUUID(), name, quantity, unit };
+    g.locker.push(created);
+    return created;
   });
 }
-function lockerEdit(id, name, quantity, unit = null) {
-  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+function lockerEdit(id, name, quantity, unit = null, newName = null) {
+  name = normName(name);
+  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
   return update(id, g => {
-    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    g.locker ||= [];
+    const entry = g.locker.find(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
     if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    if (newName !== null && String(newName).trim()) entry.name = normName(newName);
+    else entry.name = normName(entry.name);
     entry.quantity = quantity;
-    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
+    if (unit !== null && String(unit).trim()) entry.unit = normUnit(unit);
     return entry;
   });
 }
-function lockerRemove(id, name) {
+function lockerRemove(id, name, quantity = null) {
+  name = normName(name);
   return update(id, g => {
-    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    g.locker ||= [];
+    const idx = g.locker.findIndex(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
     if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    return g.locker.splice(idx, 1)[0];
+    const entry = g.locker[idx];
+    entry.name = normName(entry.name);
+    if (quantity === null || quantity === undefined) return g.locker.splice(idx, 1)[0];
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
+    if ((entry.quantity || 0) <= quantity) {
+      const removed = g.locker.splice(idx, 1)[0];
+      return { ...removed, deleted: true, quantity: 0 };
+    }
+    entry.quantity -= quantity;
+    return { ...entry, deleted: false };
+  });
+}
+function lockerSummary(g) {
+  const rows = (g?.locker || []).map(x => ({ ...x, name: displayItemName(x.name), quantity: Number(x.quantity || 0), unit: x.unit || 'ชิ้น' }));
+  const moneyTotal = rows.filter(x => ['เงินแดง','เงินเขียว'].includes(displayItemName(x.name)) || String(x.unit || '').trim() === 'บาท')
+    .reduce((sum, x) => sum + Number(x.quantity || 0), 0);
+  return { rows, totalItems: rows.length, moneyTotal };
+}
+function lockerRoleAdd(id, roleId) {
+  roleId = String(roleId || '').trim();
+  if (!roleId) throw new Error('Role ไม่ถูกต้อง');
+  return update(id, g => {
+    g.lockerManagerRoleIds ||= [];
+    if (!g.lockerManagerRoleIds.includes(roleId)) g.lockerManagerRoleIds.push(roleId);
+    return [...g.lockerManagerRoleIds];
+  });
+}
+function lockerRoleRemove(id, roleId) {
+  roleId = String(roleId || '').trim();
+  return update(id, g => {
+    g.lockerManagerRoleIds ||= [];
+    g.lockerManagerRoleIds = g.lockerManagerRoleIds.filter(x => x !== roleId);
+    return [...g.lockerManagerRoleIds];
   });
 }
 
@@ -312,5 +364,6 @@ module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
   attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
   deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
+  lockerSummary, lockerRoleAdd, lockerRoleRemove,
   deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
 };
