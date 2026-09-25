@@ -768,7 +768,8 @@ function housePanelComponents(houseId = null) {
   if (houseId) {
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`house:member-add-open:${houseId}`).setLabel('➕ เพิ่มสมาชิก').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`house:member-remove-open:${houseId}`).setLabel('➖ ลบสมาชิก').setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId(`house:member-remove-open:${houseId}`).setLabel('➖ ลบสมาชิก').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`house:reset:${houseId}`).setLabel('🔄 Reset วันนี้').setStyle(ButtonStyle.Secondary)
     ));
   }
   return rows;
@@ -940,6 +941,26 @@ function houseHistoryText(g, houseId = null, limit = 10) {
   const filtered = rows.filter(x => !houseId || x.houseId === houseId).slice(-limit).reverse();
   if (!filtered.length) return '📜 ยังไม่มีประวัติเช็กชื่อบ้าน';
   return '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + filtered.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
+}
+function houseResetWebhookPayload({ guildId, house, actorId, date, count }) {
+  return {
+    username: 'IMT Home Log',
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: '🔄 HOME LOG — Reset เช็กชื่อบ้านวันนี้',
+      color: 0xADB5BD,
+      fields: [
+        { name: 'บ้าน', value: sanitize(house.name), inline: true },
+        { name: 'ผู้ดำเนินการ', value: `<@${actorId}>`, inline: true },
+        { name: 'วันที่', value: date, inline: true },
+        { name: 'จำนวนสถานะที่ล้าง', value: `${count} รายการ`, inline: true },
+        { name: 'หมายเหตุ', value: 'ล้างเฉพาะสถานะเช็กชื่อบ้านวันนี้ ไม่ลบรายชื่อสมาชิก/หัวหน้าบ้าน และไม่กระทบเช็กชื่อปกติ', inline: false },
+        { name: 'Guild', value: guildId, inline: true }
+      ],
+      footer: { text: '[IMT] IMMORTAL • Home Log • เวลาไทย' },
+      timestamp: new Date().toISOString()
+    }]
+  };
 }
 function houseTimeWebhookPayload({ guildId, house, targetId, actorId, status, previous, log }) {
   return {
@@ -1410,6 +1431,14 @@ client.on(Events.InteractionCreate, async i => {
         if (!rows.length) return await i.reply(ep('📜 ยังไม่มีประวัติเช็กชื่อบ้าน'));
         const text = '📜 **ประวัติเช็กชื่อบ้านล่าสุด**\n' + rows.map((x, idx) => `${idx + 1}. ${x.date} • 🏠 ${sanitize(x.houseName)}\nสมาชิก: <@${x.userId}> | โดย: <@${x.actorId}>\nจาก: ${x.from ? houseStatusLabel(x.from) : 'ไม่มี'} → ${houseStatusLabel(x.to)}`).join('\n\n').slice(0, 1900);
         return await i.reply(ep(text));
+      }
+      if (i.customId.startsWith('house:reset:')) {
+        const houseId = i.customId.substring('house:reset:'.length);
+        const house = store.houseList(i.guildId).find(h => h.id === houseId);
+        if (!house || !canManageHouse(i, house)) throw new Error('คุณไม่มีสิทธิ์ Reset เช็กชื่อบ้านนี้');
+        const result = store.houseResetDay(i.guildId, store.today(), houseId, i.user.id);
+        postHomeWebhook(houseResetWebhookPayload({ guildId: i.guildId, house: result.house, actorId: i.user.id, date: result.date, count: result.count }), 'house reset').catch(e => console.error('ส่ง home_log reset เช็กชื่อบ้านไม่สำเร็จ:', e.message));
+        return await i.reply(ep(`🔄 Reset เช็กชื่อบ้านวันนี้แล้ว\nบ้าน: **${sanitize(result.house.name)}**\nวันที่: ${result.date}\nล้างสถานะ: ${result.count} รายการ\nรายชื่อสมาชิกบ้านยังอยู่เหมือนเดิม และไม่กระทบเช็กชื่อปกติ`));
       }
       if (i.customId.startsWith('house:mark:')) {
         const [, , houseId, targetId, status] = i.customId.split(':');
