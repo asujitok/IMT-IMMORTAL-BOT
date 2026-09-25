@@ -340,6 +340,24 @@ function deliveryRequiredText(g) {
   return '📋 **ของที่ต้องส่ง**\n' + rows.map((x, idx) =>
     `${idx + 1}. ${sanitize(x.name)} — ${Number(x.requiredQty || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n').slice(0, 1900);
 }
+function deliveryRequiredComponents(g) {
+  const rows = (g.deliveryItems || []).slice(0, 25);
+  const components = [];
+  for (let i = 0; i < rows.length; i += 5) {
+    const row = new ActionRowBuilder();
+    for (const item of rows.slice(i, i + 5)) {
+      const qty = Number(item.requiredQty || 0).toLocaleString('en-US');
+      const unit = sanitize(item.unit || 'ชิ้น');
+      const name = sanitize(item.name);
+      row.addComponents(new ButtonBuilder()
+        .setCustomId(`delivery:reqsend:${item.id}`)
+        .setLabel((`📦 ส่ง ${name} ${qty} ${unit}`).slice(0, 80))
+        .setStyle(ButtonStyle.Success));
+    }
+    components.push(row);
+  }
+  return components;
+}
 function deliveryLogMeta(type) {
   return {
     submitted: ['📦 DELIVERY LOG — ส่งของใหม่', 0xADB5BD],
@@ -449,12 +467,12 @@ async function refreshDeliveryDashboard(guild, date = store.today()) {
     if (saved?.messageId && saved.channelId === ch.id) {
       try {
         if (saved.logo && hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
-        await ch.messages.edit(saved.messageId, { embeds: [embed], allowedMentions: silent });
+        await ch.messages.edit(saved.messageId, { embeds: [embed], components: deliveryRequiredComponents(g), allowedMentions: silent });
         return true;
       } catch (e) { if (e.code !== 10008) console.error('แก้ไขรายงานส่งของ:', e.message); }
     }
     if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
-    const m = await ch.send({ embeds: [embed], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+    const m = await ch.send({ embeds: [embed], components: deliveryRequiredComponents(g), ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
     store.update(guild.id, gg => {
       gg.deliveryDashboard ||= {};
       gg.deliveryDashboard[date] = { messageId: m.id, channelId: ch.id, logo: hasLogo };
@@ -665,7 +683,7 @@ client.on(Events.InteractionCreate, async i => {
       if (i.customId === 'delivery:items-list') {
         const g = configOf(i);
         if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
-        return await i.reply(ep(deliveryRequiredText(g)));
+        return await i.reply({ ...ep(deliveryRequiredText(g) + ((g.deliveryItems || []).length ? '\n\nกดปุ่มรายการด้านล่างเพื่อส่งของตามจำนวนที่กำหนดได้ทันที โดยไม่ต้องกรอกชื่อ/จำนวนเอง' : '')), components: deliveryRequiredComponents(g) });
       }
       if (i.customId === 'delivery:history') {
         const g = configOf(i);
@@ -684,6 +702,17 @@ client.on(Events.InteractionCreate, async i => {
         if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
         if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
         return await i.showModal(deliveryModal());
+      }
+      if (i.customId.startsWith('delivery:reqsend:')) {
+        const g = configOf(i);
+        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
+        const itemId = i.customId.substring('delivery:reqsend:'.length);
+        const item = (g.deliveryItems || []).find(x => x.id === itemId);
+        if (!item) throw new Error('รายการของที่ต้องส่งนี้ถูกลบหรือแก้ไขแล้ว');
+        const qty = Number(item.requiredQty || 0);
+        if (!Number.isSafeInteger(qty) || qty < 1) throw new Error('รายการนี้ตั้งจำนวนไว้เป็น 0 จึงส่งผ่านปุ่มไม่ได้');
+        return await beginDelivery(i, item.name, qty, item.unit || 'ชิ้น');
       }
       if (i.customId.startsWith('delivery:approve:')) {
         return await reviewDeliveryFromButton(i, i.customId.substring('delivery:approve:'.length), 'approved');
@@ -860,7 +889,7 @@ client.on(Events.InteractionCreate, async i => {
         const channel = await i.guild.channels.fetch(g.config.deliveryChannelId);
         if (!channel?.isTextBased()) throw new Error('บอตไม่สามารถเข้าห้องส่งของได้');
         const embed = new EmbedBuilder().setTitle('📦 [IMT] IMMORTAL • ห้องส่งของ')
-          .setDescription('สมาชิกกด **ส่งของ** แล้วกรอกชื่อของและจำนวน\nทุกคนตรวจสอบรายการของที่ต้องส่งและประวัติส่งของล่าสุดได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งได้\nเมื่อมีสมาชิกส่งของแล้ว จะมีปุ่ม **✅ ยืนยันรับของ** และ **❌ ไม่รับของ** ใต้รายการนั้นโดยตรง\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
+          .setDescription('สมาชิกกด **ส่งของ** แล้วกรอกชื่อของและจำนวน หรือกดปุ่มรายการที่ต้องส่งเพื่อส่งทันทีโดยไม่ต้องกรอกเอง\nทุกคนตรวจสอบรายการของที่ต้องส่งและประวัติส่งของล่าสุดได้\nผู้มียศสามารถสร้าง/แก้ไขของที่ต้องส่งได้\nเมื่อมีสมาชิกส่งของแล้ว จะมีปุ่ม **✅ ยืนยันรับของ** และ **❌ ไม่รับของ** ใต้รายการนั้นโดยตรง\nหลังรับของแล้วจะมีปุ่มให้เลือก **นำเข้าตู้** หรือ **ไม่ดำเนินการใดๆ**')
           .setColor(0xADB5BD);
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
         const row = new ActionRowBuilder().addComponents(
