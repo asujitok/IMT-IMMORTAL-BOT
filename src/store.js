@@ -176,6 +176,16 @@ function deliveryItemRemove(id, name) {
     return g.deliveryItems.splice(idx, 1)[0];
   });
 }
+function deliveryItemRemoveById(id, itemId) {
+  itemId = String(itemId || '').trim();
+  if (!itemId) throw new Error('รายการของที่ต้องส่งไม่ถูกต้อง');
+  return update(id, g => {
+    g.deliveryItems ||= [];
+    const idx = g.deliveryItems.findIndex(x => x.id === itemId);
+    if (idx < 0) throw new Error('ไม่พบรายการของที่ต้องส่ง');
+    return g.deliveryItems.splice(idx, 1)[0];
+  });
+}
 function deliveryRoleAdd(id, roleId) {
   roleId = String(roleId || '').trim();
   if (!roleId) throw new Error('Role ไม่ถูกต้อง');
