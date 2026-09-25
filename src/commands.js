@@ -21,8 +21,8 @@ module.exports = [
     .addStringOption(o => o.setName('end').setDescription('เฉพาะลา: วันสุดท้าย เว้นว่างคือวันแรก')),
   new SlashCommandBuilder().setName('leave').setDescription('แจ้งลาวันเดียวหรือหลายวัน พร้อมเหตุผล (ลาได้ทั้งวัน)')
     .addStringOption(o => o.setName('start').setDescription('วันเริ่มลา เช่น 26/09/2569 หรือ 2026-09-26').setRequired(true))
-    .addStringOption(o => o.setName('end').setDescription('วันสุดท้าย เว้นว่างคือวันแรก'))
-    .addStringOption(o => o.setName('reason').setDescription('เหตุผลการลา (3–250 ตัวอักษร)').setRequired(true).setMinLength(3).setMaxLength(250)),
+    .addStringOption(o => o.setName('reason').setDescription('วันสุดท้าย เว้นว่างคือวันแรก'))
+    .addStringOption(o => o.setName('end').setDescription('เหตุผลการลา (3–250 ตัวอักษร)').setRequired(true).setMinLength(3).setMaxLength(250)),
   new SlashCommandBuilder().setName('history').setDescription('ดูประวัติเช็กชื่อ ส่งในห้อง 5 นาทีแล้วลบอัตโนมัติ')
     .addUserOption(o => o.setName('member').setDescription('สมาชิกที่ต้องการดู ไม่เลือกคือดูตนเอง')),
   new SlashCommandBuilder().setName('item').setDescription('ผู้ดูแล: จัดการรายการของที่ต้องตรวจ')
