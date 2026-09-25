@@ -28,9 +28,10 @@ if (!token || token === 'PUT_YOUR_BOT_TOKEN_HERE') {
 // สมัครใช้ GuildMembers เฉพาะเมื่อเปิดสิทธิ์ SERVER MEMBERS INTENT ที่หน้า Discord แล้ว
 const hasMemberIntent = process.env.ENABLE_MEMBERS_INTENT === 'true';
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions,
-    ...(hasMemberIntent ? [GatewayIntentBits.GuildMembers] : [])],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+  ]
 });
 const silent = { parse: [] };
 const attendanceNames = attendanceFlow.STATUSES;
