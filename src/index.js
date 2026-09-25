@@ -484,6 +484,13 @@ function deliveryRequiredText(g) {
   return '📋 **ของที่ต้องส่ง**\n' + rows.map((x, idx) =>
     `${idx + 1}. ${itemLabel(x.name)} — ${Number(x.requiredQty || 0).toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n').slice(0, 1900);
 }
+function deliveryStatusQuickComponents() {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger)
+  )];
+}
+
 function deliveryRequiredComponents(g) {
   // Discord แสดงปุ่มได้สูงสุด 5 แถว/ข้อความ และ 5 ปุ่ม/แถว
   // จัดแบบ 1 รายการ = ปุ่มส่ง + ปุ่มยกเลิกของผู้ดูแล เพื่อให้ปุ่มอยู่ข้างกัน
@@ -1586,8 +1593,9 @@ client.on(Events.InteractionCreate, async i => {
         if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
         await i.deferReply({ flags: MessageFlags.Ephemeral });
         const roster = await optionalRoster(i.guild, g.config);
-        const text = delivery.summary(g, store.today(), roster, g.config.time || '20:00');
-        return await i.editReply({ content: text.slice(0, 1900), allowedMentions: silent });
+        const text = delivery.summary(g, store.today(), roster, g.config.time || '20:00') + `\n\nผู้มียศตรวจของสามารถใช้ปุ่มด้านล่างเพื่อเปลี่ยนสถานะได้ทันที`;
+        const components = deliveryManager(i, g) ? deliveryStatusQuickComponents() : [];
+        return await i.editReply({ content: text.slice(0, 1900), components, allowedMentions: silent });
       }
       if (i.customId === 'delivery:items-manage') {
         const g = configOf(i);
@@ -1949,9 +1957,14 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
         if (hasLogo) embed.setThumbnail('attachment://IMMORTAL-2.png');
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('delivery:items-manage').setLabel('🛠 สร้าง/แก้ไขของที่ต้องส่ง').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId('delivery:items-list').setLabel('📋 ตรวจสอบของที่ต้องส่ง').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('delivery:checklist').setLabel('📋 เช็คชื่อส่งของ').setStyle(ButtonStyle.Primary)
         );
-        await channel.send({ embeds: [embed], components: [row], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
+        const managerRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger)
+        );
+        await channel.send({ embeds: [embed], components: [row, managerRow], ...(hasLogo ? { files: [logoFile] } : {}), allowedMentions: silent });
         await refreshDeliveryDashboard(i.guild);
         return await i.editReply({ content: `ส่ง UI ปุ่มและรายงานสดไปที่ ${channel} แล้ว`, allowedMentions: silent });
       }
