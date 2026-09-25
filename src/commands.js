@@ -109,16 +109,6 @@ module.exports = [
       .addSubcommand(s => s.setName('remove').setDescription('ผู้ดูแล: เอาสมาชิกออกจากบ้าน')
         .addStringOption(o => o.setName('house').setDescription('ชื่อบ้าน').setRequired(true).setMaxLength(50))
         .addUserOption(o => o.setName('user').setDescription('ลูกบ้าน').setRequired(true)))),
-
-  new SlashCommandBuilder().setName('profile').setDescription('ดูโปรไฟล์สมาชิก: บ้าน สถานะวันนี้ คะแนนวินัย ส่งของล่าสุด')
-    .addUserOption(o => o.setName('member').setDescription('สมาชิกที่ต้องการดู ไม่เลือกคือดูตนเอง')),
-  new SlashCommandBuilder().setName('discipline').setDescription('ผู้ดูแล: ดูคะแนนวินัยสมาชิก')
-    .setDefaultMemberPermissions(admin),
-  new SlashCommandBuilder().setName('admin').setDescription('ผู้ดูแล: Dashboard / Weekly / Backup')
-    .setDefaultMemberPermissions(admin)
-    .addSubcommand(s => s.setName('panel').setDescription('เปิด Admin Dashboard แบบปุ่ม'))
-    .addSubcommand(s => s.setName('weekly').setDescription('ส่ง/ดูสรุปรายสัปดาห์ทันที'))
-    .addSubcommand(s => s.setName('backup').setDescription('ส่ง Backup ข้อมูลไปยัง backup_log')),
   new SlashCommandBuilder().setName('status').setDescription('ดูสถานะเช็กชื่อและเช็กของวันนี้ของตนเอง'),
   new SlashCommandBuilder().setName('report').setDescription('ผู้ดูแล: ดูสรุปของวันนี้')
     .setDefaultMemberPermissions(admin)
