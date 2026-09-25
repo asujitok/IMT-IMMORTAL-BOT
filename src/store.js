@@ -111,6 +111,50 @@ function attendanceRange(id, dates, userId, reason, expectedSnapshots) {
     return { changes, unchanged: changes.every(x => x.unchanged) };
   });
 }
+
+function attendanceAdminEdit(id, date, userId, status, reason = '', actorId = null) {
+  date = String(date || today()).trim();
+  userId = String(userId || '').trim();
+  status = String(status || '').trim();
+  reason = String(reason || '').trim();
+  actorId = actorId ? String(actorId).trim() : null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('วันที่ไม่ถูกต้อง กรุณาใช้ YYYY-MM-DD');
+  if (!/^\d{5,25}$/.test(userId)) throw new Error('สมาชิกไม่ถูกต้อง กรุณาใส่ mention หรือ Discord ID');
+  if (!['present', 'late', 'leave', 'clear'].includes(status)) throw new Error('สถานะใหม่ไม่ถูกต้อง');
+  if (status !== 'present' && status !== 'clear' && (reason.length < 3 || reason.length > 250)) {
+    throw new Error('มาสายและลาต้องระบุเหตุผล 3–250 ตัวอักษร');
+  }
+  if (status === 'present') reason = reason.slice(0, 250);
+  if (status === 'clear' && reason.length > 250) reason = reason.slice(0, 250);
+  return update(id, g => {
+    g.attendance ||= {};
+    g.attendance[date] ||= {};
+    const previous = g.attendance[date][userId] || null;
+    let record = null;
+    if (status === 'clear') {
+      if (previous) delete g.attendance[date][userId];
+    } else {
+      record = { status, reason, at: new Date().toISOString(), revision: randomUUID(), adminEditedBy: actorId };
+      g.attendance[date][userId] = record;
+    }
+    g.attendanceEditHistory ||= [];
+    const seq = (g.attendanceEditHistory.at(-1)?.seq || 0) + 1;
+    const log = { id: 'TE-' + String(seq).padStart(6, '0'), seq, date, userId, actorId,
+      from: previous?.status || null, to: status === 'clear' ? null : status,
+      previousReason: previous?.reason || '', reason, at: new Date().toISOString() };
+    g.attendanceEditHistory.push(log);
+    if (g.attendanceEditHistory.length > 1000) g.attendanceEditHistory.splice(0, g.attendanceEditHistory.length - 1000);
+    return { previous, record, log };
+  });
+}
+function attendanceEditHistory(id, { userId = null, date = null, limit = 10 } = {}) {
+  const g = getGuild(id);
+  let rows = [...(g?.attendanceEditHistory || [])];
+  if (userId) rows = rows.filter(x => x.userId === userId || x.actorId === userId);
+  if (date) rows = rows.filter(x => x.date === date);
+  return rows.reverse().slice(0, Math.max(1, Math.min(Number(limit) || 10, 25)));
+}
+
 // ถ้าอ่านสมาชิกไม่ได้ ห้ามสร้างวันขาดย้อนหลังจากรายชื่อปัจจุบัน
 function saveRosterAtClose(id, date, userIds) {
   if (!Array.isArray(userIds)) throw new Error('ต้องมีรายชื่อสมาชิกจริงที่อ่านได้');
@@ -146,15 +190,8 @@ function inventory(id, date, userId, itemId, foundQty, condition, note = '') {
 }
 
 
-function displayItemName(name) {
-  const value = String(name || '').trim();
-  const key = value.toLocaleLowerCase();
-  if (key === 'red money') return 'เงินแดง';
-  if (key === 'money') return 'เงินเขียว';
-  return value;
-}
 function normName(name) {
-  const value = displayItemName(name);
+  const value = String(name || '').trim();
   if (!value || value.length > 80 || /[\r\n]/.test(value)) throw new Error('ชื่อของต้องมี 1–80 ตัวอักษรและไม่มีการขึ้นบรรทัดใหม่');
   return value;
 }
@@ -232,75 +269,30 @@ function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
 
 // ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
 function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
-  name = normName(name); unit = normUnit(unit);
-  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  name = String(name || '').trim(); unit = String(unit || '').trim();
+  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
   return update(id, g => {
     g.locker ||= [];
-    const entry = g.locker.find(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (entry) {
-      entry.name = name;
-      entry.quantity = (entry.quantity || 0) + quantity;
-      entry.unit = unit || entry.unit || 'ชิ้น';
-      return entry;
-    }
-    const created = { id: randomUUID(), name, quantity, unit };
-    g.locker.push(created);
-    return created;
+    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
+    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
   });
 }
-function lockerEdit(id, name, quantity, unit = null, newName = null) {
-  name = normName(name);
-  if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+function lockerEdit(id, name, quantity, unit = null) {
+  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
   return update(id, g => {
-    g.locker ||= [];
-    const entry = g.locker.find(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
+    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
     if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    if (newName !== null && String(newName).trim()) entry.name = normName(newName);
-    else entry.name = normName(entry.name);
     entry.quantity = quantity;
-    if (unit !== null && String(unit).trim()) entry.unit = normUnit(unit);
+    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
     return entry;
   });
 }
-function lockerRemove(id, name, quantity = null) {
-  name = normName(name);
+function lockerRemove(id, name) {
   return update(id, g => {
-    g.locker ||= [];
-    const idx = g.locker.findIndex(x => normName(x.name).toLocaleLowerCase() === name.toLocaleLowerCase());
+    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
     if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    const entry = g.locker[idx];
-    entry.name = normName(entry.name);
-    if (quantity === null || quantity === undefined) return g.locker.splice(idx, 1)[0];
-    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
-    if ((entry.quantity || 0) <= quantity) {
-      const removed = g.locker.splice(idx, 1)[0];
-      return { ...removed, deleted: true, quantity: 0 };
-    }
-    entry.quantity -= quantity;
-    return { ...entry, deleted: false };
-  });
-}
-function lockerSummary(g) {
-  const rows = (g?.locker || []).map(x => ({ ...x, name: displayItemName(x.name), quantity: Number(x.quantity || 0), unit: x.unit || 'ชิ้น' }));
-  const moneyTotal = rows.filter(x => ['เงินแดง','เงินเขียว'].includes(displayItemName(x.name)) || String(x.unit || '').trim() === 'บาท')
-    .reduce((sum, x) => sum + Number(x.quantity || 0), 0);
-  return { rows, totalItems: rows.length, moneyTotal };
-}
-function lockerRoleAdd(id, roleId) {
-  roleId = String(roleId || '').trim();
-  if (!roleId) throw new Error('Role ไม่ถูกต้อง');
-  return update(id, g => {
-    g.lockerManagerRoleIds ||= [];
-    if (!g.lockerManagerRoleIds.includes(roleId)) g.lockerManagerRoleIds.push(roleId);
-    return [...g.lockerManagerRoleIds];
-  });
-}
-function lockerRoleRemove(id, roleId) {
-  roleId = String(roleId || '').trim();
-  return update(id, g => {
-    g.lockerManagerRoleIds ||= [];
-    g.lockerManagerRoleIds = g.lockerManagerRoleIds.filter(x => x !== roleId);
-    return [...g.lockerManagerRoleIds];
+    return g.locker.splice(idx, 1)[0];
   });
 }
 
@@ -362,8 +354,7 @@ function markSent(id, date, kind) {
 }
 module.exports = {
   DATA_FILE, load, getGuild, getGuildIds, update, setConfig, addItem, removeItem,
-  attendance, attendanceRange, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
+  attendance, attendanceRange, attendanceAdminEdit, attendanceEditHistory, inventory, today, timeBangkok, markSent, lockerAdd, lockerEdit, lockerRemove, lockerIncrease,
   deliveryItemUpsert, deliveryItemRemove, deliveryItemRemoveById, deliveryResetRows, deliveryResetItems, deliveryRoleAdd, deliveryRoleRemove,
-  lockerSummary, lockerRoleAdd, lockerRoleRemove,
   deliveryLogAdd, deliveryHistory, saveRosterAtClose, saveHistoryView, removeHistoryView
 };
