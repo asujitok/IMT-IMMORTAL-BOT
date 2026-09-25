@@ -72,6 +72,12 @@ function onlyTeam(i, g) {
   return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
     Boolean(g?.config && (roles?.cache?.has(g.config.roleId) || roles?.includes?.(g.config.roleId)));
 }
+function isHouseMember(g, userId) {
+  return Boolean((g?.houses || []).some(h => Array.isArray(h.memberIds) && h.memberIds.includes(userId)));
+}
+function canUseDelivery(i, g) {
+  return onlyTeam(i, g) || isHouseMember(g, i.user.id);
+}
 function manager(i) { return i.memberPermissions?.has(PermissionFlagsBits.ManageGuild); }
 function ep(content) { return { content, flags: MessageFlags.Ephemeral, allowedMentions: silent }; }
 function configOf(i) {
@@ -500,6 +506,9 @@ function deliveryRequiredComponents(g) {
     ));
   }
   components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('delivery:checklist').setLabel('📋 เช็คชื่อส่งของ').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('delivery:fix:rejected-approved').setLabel('✅ ไม่รับ → รับแล้ว').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('delivery:fix:approved-rejected').setLabel('❌ รับแล้ว → ไม่รับ').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('delivery:reset-rows').setLabel('🔄 Reset รายชื่อ').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delivery:reset-items').setLabel('🧹 Reset ของ').setStyle(ButtonStyle.Danger)
   ));
@@ -1117,6 +1126,32 @@ function deliveryItemModal() {
     new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit')
       .setLabel('หน่วย').setPlaceholder('เช่น ชิ้น หรือ บาท').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(20)));
 }
+
+function deliveryStatusEditModal(fromStatus, toStatus) {
+  const title = fromStatus === 'rejected'
+    ? 'เปลี่ยน ไม่รับ → รับแล้ว'
+    : 'เปลี่ยน รับแล้ว → ไม่รับ';
+  const modal = new ModalBuilder()
+    .setCustomId(`delivery:statusedit:${fromStatus}:${toStatus}`)
+    .setTitle(title.slice(0, 45));
+  const member = new TextInputBuilder()
+    .setCustomId('member')
+    .setLabel('สมาชิก (Mention หรือ Discord ID)')
+    .setPlaceholder('@สมาชิก หรือ 123456789012345678')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(80);
+  const note = new TextInputBuilder()
+    .setCustomId('note')
+    .setLabel('หมายเหตุ (ไม่บังคับ)')
+    .setPlaceholder('เช่น ตรวจใหม่แล้ว / กดผิด')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(250);
+  modal.addComponents(new ActionRowBuilder().addComponents(member), new ActionRowBuilder().addComponents(note));
+  return modal;
+}
+
 async function refreshDeliveryDashboard(guild, date = store.today()) {
   const key = `${guild.id}:${date}:delivery`;
   const previous = deliveryQueue.get(key) || Promise.resolve();
@@ -1163,7 +1198,7 @@ function deliveryModal() {
 }
 async function beginDelivery(i, name, quantity, unit = 'ชิ้น') {
   const g = configOf(i);
-  if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+  if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน ถึงจะส่งของได้');
   if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้กำหนดห้องส่งของ ให้ผู้ดูแลใช้ /delivery setchannel ก่อน');
   const item = delivery.prepare(i.guildId, i.user.id, name, quantity, store.today(), unit || 'ชิ้น');
   const row = new ActionRowBuilder().addComponents(
@@ -1173,7 +1208,7 @@ async function beginDelivery(i, name, quantity, unit = 'ชิ้น') {
 }
 async function confirmDelivery(i, id) {
   const g = configOf(i);
-  if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+  if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน ถึงจะยืนยันส่งของได้');
   const p = delivery.take(id, i.guildId, i.user.id);
   await i.deferUpdate();
   if (p.date !== store.today()) throw new Error('ข้ามวันแล้ว กรุณาส่งของใหม่');
@@ -1210,6 +1245,63 @@ async function reviewDeliveryFromButton(i, id, outcome) {
   await i.message.edit({ content: receiptText(result.entry), components: deliveryReviewComponents(result.entry), allowedMentions: silent });
   await refreshDeliveryDashboard(i.guild, match.date);
 }
+
+async function updateDeliveryReceiptMessage(guild, entry) {
+  if (!entry?.channelId || !entry?.messageId) return false;
+  try {
+    const ch = await guild.channels.fetch(entry.channelId);
+    if (!ch?.isTextBased()) return false;
+    const msg = await ch.messages.fetch(entry.messageId);
+    await msg.edit({ content: receiptText(entry), components: deliveryReviewComponents(entry), allowedMentions: silent });
+    return true;
+  } catch (e) {
+    console.error('อัปเดตข้อความรายการส่งของไม่สำเร็จ:', e.message);
+    return false;
+  }
+}
+
+async function applyDeliveryStatusEditFromModal(i, fromStatus, toStatus) {
+  const g = configOf(i);
+  requireDeliveryManager(i, g);
+  const targetId = parseDiscordUserId(i.fields.getTextInputValue('member'));
+  const note = i.fields.getTextInputValue('note').trim();
+  const date = store.today();
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const latestGuild = store.getGuild(i.guildId);
+  const rows = delivery.list(latestGuild, date)
+    .filter(x => x.userId === targetId && x.status === fromStatus && !x.supersededBy)
+    .sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
+  if (!rows.length) {
+    const fromText = fromStatus === 'rejected' ? 'ไม่รับ' : 'รับแล้ว';
+    return await i.editReply(`ไม่พบรายการสถานะ **${fromText}** ของ <@${targetId}> ในวันนี้`);
+  }
+
+  let changed = 0;
+  for (const row of rows) {
+    const result = delivery.review(i.guildId, date, row.id, toStatus, i.user.id);
+    if (!result.unchanged) {
+      changed++;
+      await recordDeliveryLog(i.guildId, toStatus === 'approved' ? 'approved' : 'rejected', {
+        date,
+        userId: result.entry.userId,
+        actorId: i.user.id,
+        reviewerId: i.user.id,
+        deliveryId: result.entry.id,
+        itemName: result.entry.name,
+        quantity: result.entry.quantity,
+        unit: result.entry.unit,
+        status: result.entry.status,
+        note: note || `แก้จาก ${fromStatus} เป็น ${toStatus} ผ่าน UI รายงานส่งของ`
+      });
+      await updateDeliveryReceiptMessage(i.guild, result.entry);
+    }
+  }
+  await refreshDeliveryDashboard(i.guild, date).catch(e => console.error('รีเฟรชรายงานส่งของหลังแก้สถานะจาก UI:', e.message));
+  const toText = toStatus === 'approved' ? 'รับแล้ว' : 'ไม่รับ';
+  return await i.editReply(`แก้สถานะของ <@${targetId}> เป็น **${toText}** แล้ว ${changed} รายการ`);
+}
+
 async function deliveryLockerAction(i, id, action) {
   const g = configOf(i);
   requireDeliveryManager(i, g);
@@ -1489,6 +1581,14 @@ client.on(Events.InteractionCreate, async i => {
       if (['attendance:present', 'attendance:late', 'attendance:leave'].includes(i.customId)) {
         return await beginAttendance(i, i.customId.split(':')[1]);
       }
+      if (i.customId === 'delivery:checklist') {
+        const g = configOf(i);
+        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+        const roster = await optionalRoster(i.guild, g.config);
+        const text = delivery.summary(g, store.today(), roster, g.config.time || '20:00');
+        return await i.editReply({ content: text.slice(0, 1900), allowedMentions: silent });
+      }
       if (i.customId === 'delivery:items-manage') {
         const g = configOf(i);
         requireDeliveryManager(i, g);
@@ -1496,12 +1596,12 @@ client.on(Events.InteractionCreate, async i => {
       }
       if (i.customId === 'delivery:items-list') {
         const g = configOf(i);
-        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
         return await i.reply({ ...ep(deliveryRequiredText(g) + ((g.deliveryItems || []).length ? '\n\nกดปุ่มรายการด้านล่างเพื่อส่งของตามจำนวนที่กำหนดได้ทันที โดยไม่ต้องกรอกชื่อ/จำนวนเอง' : '')), components: deliveryRequiredComponents(g) });
       }
       if (i.customId === 'delivery:history') {
         const g = configOf(i);
-        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
         return await i.reply(ep(deliveryHistoryTextForGuild(i.guildId, { limit: 10 })));
       }
       if (i.customId === 'delivery:pending') {
@@ -1511,15 +1611,25 @@ client.on(Events.InteractionCreate, async i => {
         const text = rows.length ? rows.slice(0, 20).map(x => `${x.seq}. <@${x.userId}> — ${itemLabel(x.name)} ${x.quantity.toLocaleString('en-US')} ${sanitize(x.unit || 'ชิ้น')}`).join('\n') : 'ไม่มีรายการรอตรวจ';
         return await i.reply(ep('✅ **รายการรอยืนยันวันนี้**\n' + text + '\n\nให้กดปุ่ม ✅ หรือ ❌ ใต้ข้อความรายการนั้นโดยตรง'));
       }
+      if (i.customId === 'delivery:fix:rejected-approved') {
+        const g = configOf(i);
+        requireDeliveryManager(i, g);
+        return await i.showModal(deliveryStatusEditModal('rejected', 'approved'));
+      }
+      if (i.customId === 'delivery:fix:approved-rejected') {
+        const g = configOf(i);
+        requireDeliveryManager(i, g);
+        return await i.showModal(deliveryStatusEditModal('approved', 'rejected'));
+      }
       if (i.customId === 'delivery:open') {
         const g = configOf(i);
-        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
         if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
         return await i.showModal(deliveryModal());
       }
       if (i.customId.startsWith('delivery:reqsend:')) {
         const g = configOf(i);
-        if (!onlyTeam(i, g)) throw new Error('คุณไม่มีบทบาทสมาชิกทีม');
+        if (!canUseDelivery(i, g)) throw new Error('คุณต้องเป็นสมาชิกทีม หรือถูกเพิ่มอยู่ในบ้านก่อน');
         if (!g.config.deliveryChannelId) throw new Error('ยังไม่ได้ตั้งห้องส่งของ');
         const itemId = i.customId.substring('delivery:reqsend:'.length);
         const item = (g.deliveryItems || []).find(x => x.id === itemId);
@@ -1669,6 +1779,11 @@ ${lockerSummaryText(store.getGuild(i.guildId)).slice(0, 1500)}`) });
       const raw = i.fields.getTextInputValue('quantity').trim();
       if (!/^\d{1,13}$/.test(raw)) throw new Error('กรุณาใส่จำนวนเป็นเลขจำนวนเต็ม 1–1,000,000,000,000');
       return await beginDelivery(i, i.fields.getTextInputValue('name'), Number(raw), i.fields.getTextInputValue('unit') || 'ชิ้น');
+    }
+
+    if (i.isModalSubmit() && i.customId.startsWith('delivery:statusedit:')) {
+      const parts = i.customId.split(':');
+      return await applyDeliveryStatusEditFromModal(i, parts[2], parts[3]);
     }
 
     if (i.isModalSubmit() && (i.customId.startsWith('house:member-add-modal:') || i.customId.startsWith('house:member-remove-modal:'))) {
