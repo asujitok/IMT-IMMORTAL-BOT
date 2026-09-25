@@ -88,3 +88,18 @@ test('ยืนยันการส่งชื่อของใหม่ท�
   delivery.review(guild, date, record.id, 'approved', 'mod');
   assert.equal((store.getGuild(guild).locker || []).some(x => x.name === 'เหล็ก'), false);
 });
+test('ประวัติส่งของบันทึกและกรองได้ พร้อมกันการนำเข้าตู้ซ้ำ', () => {
+  const rec = delivery.submit(guild, delivery.prepare(guild, 'hist-user', 'red ticket', 3, date, 'ชิ้น'));
+  store.deliveryLogAdd(guild, 'submitted', { date, userId: 'hist-user', deliveryId: rec.id, itemName: rec.name, quantity: rec.quantity, unit: rec.unit, status: 'pending' });
+  delivery.review(guild, date, rec.id, 'approved', 'mod');
+  const mark1 = delivery.markLockerAction(guild, date, rec.id, 'imported', 'mod');
+  assert.equal(mark1.unchanged, false);
+  const change = store.lockerIncrease(guild, rec.name, rec.quantity, rec.unit);
+  store.deliveryLogAdd(guild, 'locker_imported', { date, userId: rec.userId, actorId: 'mod', deliveryId: rec.id, itemName: rec.name, quantity: rec.quantity, unit: rec.unit, lockerAction: 'imported', beforeQty: change.beforeQty, afterQty: change.afterQty });
+  const mark2 = delivery.markLockerAction(guild, date, rec.id, 'imported', 'mod');
+  assert.equal(mark2.unchanged, true);
+  const rows = store.deliveryHistory(guild, { itemName: 'red ticket', limit: 5 });
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].type, 'locker_imported');
+  assert.equal(rows[1].type, 'submitted');
+});
