@@ -77,3 +77,37 @@ test('ผู้ดูแลแก้ไขสถานะเช็กชื่�
 test('ผู้ดูแลแก้ไขเช็กชื่อด้วยเวลาไม่ถูกต้องไม่ได้', () => {
   assert.throws(() => db.attendanceAdminEdit('test-server', db.today(), '123456789012345678', 'present', '', '987654321098765432', '25:99'), /เวลาไม่ถูกต้อง/);
 });
+
+test('เช็กชื่อบ้านแยกจากเช็กชื่อปกติและหัวหน้าบ้านเช็กแทนได้', () => {
+  const house = db.houseAdd('g-house', 'บ้าน 1');
+  db.houseLeaderSet('g-house', 'บ้าน 1', '111111111111111111');
+  db.houseMemberAdd('g-house', 'บ้าน 1', '222222222222222222');
+  const result = db.houseMark('g-house', '2026-09-25', house.id, '222222222222222222', 'present', '111111111111111111', 'เช็กโดยหัวหน้าบ้าน');
+  assert.equal(result.house.name, 'บ้าน 1');
+  assert.equal(result.record.status, 'present');
+  const g = db.getGuild('g-house');
+  assert.equal(g.houseAttendance['2026-09-25'][house.id]['222222222222222222'].status, 'present');
+  assert.equal(g.attendance?.['2026-09-25']?.['222222222222222222'], undefined);
+  assert.equal(g.houseAttendanceHistory.length, 1);
+});
+
+test('สมาชิกหนึ่งคนถูกย้ายได้บ้านเดียวและห้ามเช็กคนที่ไม่ได้อยู่ในบ้าน', () => {
+  const a = db.houseAdd('g-house2', 'บ้าน A');
+  const b = db.houseAdd('g-house2', 'บ้าน B');
+  db.houseMemberAdd('g-house2', 'บ้าน A', '333333333333333333');
+  db.houseMemberAdd('g-house2', 'บ้าน B', '333333333333333333');
+  const g = db.getGuild('g-house2');
+  assert.equal(g.houses.find(h => h.id === a.id).memberIds.includes('333333333333333333'), false);
+  assert.equal(g.houses.find(h => h.id === b.id).memberIds.includes('333333333333333333'), true);
+  assert.throws(() => db.houseMark('g-house2', '2026-09-25', a.id, '333333333333333333', 'present', '111111111111111111'), /ไม่ได้อยู่ในบ้านนี้/);
+});
+
+
+test('lockerSummary returns rows and item count', () => {
+  store.lockerAdd('g_lock_summary', 'red money', 3299, 'บาท');
+  store.lockerAdd('g_lock_summary', 'weapon box', 8, 'ชิ้น');
+  const g = store.getGuild('g_lock_summary');
+  const summary = store.lockerSummary(g);
+  expect(summary.totalItems).toBe(2);
+  expect(summary.rows.some(x => x.name === 'red money')).toBe(true);
+});
