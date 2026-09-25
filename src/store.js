@@ -272,31 +272,63 @@ function lockerIncrease(id, name, quantity, unit = 'ชิ้น') {
 }
 
 // ตู้แก๊งส่วนกลาง แยกจากรายการเช็กของเดิมต่อสมาชิก
+// lockerAdd = บวกจำนวนอัตโนมัติ: ถ้ามีรายการอยู่แล้วจะเพิ่มยอด ไม่สร้างซ้ำ
 function lockerAdd(id, name, quantity, unit = 'ชิ้น') {
-  name = String(name || '').trim(); unit = String(unit || '').trim();
-  if (!name || name.length > 80 || !unit || unit.length > 20) throw new Error('ชื่อของหรือหน่วยไม่ถูกต้อง');
-  if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
+  name = normName(name); unit = normUnit(unit);
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
   return update(id, g => {
     g.locker ||= [];
-    if (g.locker.some(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('มีรายการนี้แล้ว ใช้ /locker edit เพื่อแก้ไข');
-    const entry = { id: randomUUID(), name, quantity, unit }; g.locker.push(entry); return entry;
+    const entry = g.locker.find(x => x.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (entry) {
+      const beforeQty = Number(entry.quantity || 0);
+      const afterQty = beforeQty + quantity;
+      if (!Number.isSafeInteger(afterQty)) throw new Error('ยอดรวมเกินจำนวนที่ระบบรองรับ');
+      entry.quantity = afterQty;
+      if (unit) entry.unit = unit;
+      return { ...entry, beforeQty, afterQty, deltaQty: quantity, created: false };
+    }
+    const created = { id: randomUUID(), name, quantity, unit };
+    g.locker.push(created);
+    return { ...created, beforeQty: 0, afterQty: quantity, deltaQty: quantity, created: true };
   });
 }
-function lockerEdit(id, name, quantity, unit = null) {
+function lockerEdit(id, name, quantity, unit = null, newName = null) {
   if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('จำนวนต้องเป็นจำนวนเต็มตั้งแต่ 0 ขึ้นไป');
   return update(id, g => {
-    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    const entry = (g.locker || []).find(x => x.name.toLocaleLowerCase() === String(name || '').trim().toLocaleLowerCase());
     if (!entry) throw new Error('ไม่พบรายการในตู้แก๊ง');
+    const beforeQty = Number(entry.quantity || 0);
+    const beforeName = entry.name;
+    if (newName !== null && String(newName).trim()) {
+      const target = normName(newName);
+      const duplicate = (g.locker || []).find(x => x !== entry && x.name.toLocaleLowerCase() === target.toLocaleLowerCase());
+      if (duplicate) throw new Error('ชื่อใหม่ซ้ำกับรายการอื่นในตู้แก๊ง');
+      entry.name = target;
+    }
     entry.quantity = quantity;
-    if (unit !== null) { if (!unit.trim() || unit.length > 20) throw new Error('หน่วยไม่ถูกต้อง'); entry.unit = unit.trim(); }
-    return entry;
+    if (unit !== null) { const nextUnit = normUnit(unit); entry.unit = nextUnit; }
+    return { ...entry, beforeQty, afterQty: entry.quantity, beforeName, deltaQty: entry.quantity - beforeQty };
   });
 }
-function lockerRemove(id, name) {
+function lockerRemove(id, name, quantity = null) {
   return update(id, g => {
-    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name).toLocaleLowerCase());
+    const idx = (g.locker || []).findIndex(x => x.name.toLocaleLowerCase() === String(name || '').trim().toLocaleLowerCase());
     if (idx < 0) throw new Error('ไม่พบรายการในตู้แก๊ง');
-    return g.locker.splice(idx, 1)[0];
+    const entry = g.locker[idx];
+    const beforeQty = Number(entry.quantity || 0);
+    if (quantity === null || quantity === undefined) {
+      const [removed] = g.locker.splice(idx, 1);
+      return { ...removed, beforeQty, afterQty: 0, deltaQty: -beforeQty, deleted: true };
+    }
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000000000000) throw new Error('จำนวนที่ลบต้องเป็นจำนวนเต็ม 1–1,000,000,000,000');
+    if (quantity > beforeQty) throw new Error(`ของในตู้มีแค่ ${beforeQty.toLocaleString('en-US')} ${entry.unit || 'ชิ้น'} ไม่สามารถลด ${quantity.toLocaleString('en-US')} ได้`);
+    const afterQty = beforeQty - quantity;
+    if (afterQty <= 0) {
+      const [removed] = g.locker.splice(idx, 1);
+      return { ...removed, beforeQty, afterQty: 0, deltaQty: -quantity, deleted: true };
+    }
+    entry.quantity = afterQty;
+    return { ...entry, beforeQty, afterQty, deltaQty: -quantity, deleted: false };
   });
 }
 
